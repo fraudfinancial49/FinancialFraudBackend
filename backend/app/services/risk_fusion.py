@@ -19,6 +19,15 @@ from typing import Dict
 from sqlalchemy.orm import Session
 
 from app.db import models
+import logging
+from typing import Dict
+
+from sqlalchemy.orm import Session
+
+from app.db import models
+
+# Initialize logger for this file
+logger = logging.getLogger("risk_fusion")
 
 # Phase-4-only signal, not present in Phase 3's frozen `fusion_weights`.
 THREAT_SCORE_SUPPLEMENTAL_WEIGHT = 0.10
