@@ -34,36 +34,20 @@ from huggingface_hub import snapshot_download
 
 
 
-logger = logging.getLogger("startup")
-def sync_artifacts():
-    """Syncs the artifacts folder from Hugging Face."""
+import logging
+from fastapi import FastAPI, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from app.core.config import settings
+from app.db.base import Base, engine
+from app.routers import auth, transactions, vault, honeypot, admin, ops
 
-    target_dir = "/srv/artifacts"
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+logger = logging.getLogger("main")
 
-    logger.info("Syncing artifacts from Hugging Face...")
+app = FastAPI(title=settings.APP_NAME, version=settings.APP_VERSION)
 
-    
-
-    # This downloads the repo structure to /srv/artifacts
-
-    snapshot_download(
-
-        repo_id="ff49/financialfraudmodel", # CHANGE THIS
-
-        local_dir=target_dir,
-
-        token=os.getenv("HF_TOKEN"), # Ensure this is in Render Env Vars
-
-        ignore_patterns=["*.git*"]
-
-    )
-
-    logger.info("Artifacts successfully synchronized from Hugging Face.")
-# --- Middleware & Routes ---
-app.add_middleware(
-    CORSMiddleware, allow_origins=settings.CORS_ORIGINS, allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 app.include_router(auth.router)
 app.include_router(transactions.router)
@@ -72,16 +56,11 @@ app.include_router(honeypot.router)
 app.include_router(admin.router)
 app.include_router(ops.router)
 
-
 @app.on_event("startup")
 def on_startup():
-    # Call the new Hugging Face sync function
-    sync_artifacts()  # Ensure this name matches your function definition!
-    
     Base.metadata.create_all(bind=engine)
-    ml_service.registry.load()
-    graph_svc_module.graph_service.load()
-    logger.info("Startup complete. %s v%s ready.", settings.APP_NAME, settings.APP_VERSION)
+    logger.info("Startup complete. Backend ready for lazy-loaded inference.")
+
 # --- Centralized error interceptors: never leak a raw traceback to a caller ---
 @app.exception_handler(FeatureSchemaError)
 async def feature_schema_error_handler(request: Request, exc: FeatureSchemaError):
