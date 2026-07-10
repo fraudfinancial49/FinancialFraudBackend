@@ -75,19 +75,13 @@ app.include_router(ops.router)
 
 @app.on_event("startup")
 def on_startup():
-    # 1. Sync files first
-    sync_artifacts_from_drive()
+    # Call the new Hugging Face sync function
+    sync_artifacts()  # Ensure this name matches your function definition!
     
-    # 2. Database
     Base.metadata.create_all(bind=engine)
-    
-    # 3. Load models (now safe because files exist)
     ml_service.registry.load()
     graph_svc_module.graph_service.load()
-    
     logger.info("Startup complete. %s v%s ready.", settings.APP_NAME, settings.APP_VERSION)
-
-# ... (keep your existing exception handlers below)
 # --- Centralized error interceptors: never leak a raw traceback to a caller ---
 @app.exception_handler(FeatureSchemaError)
 async def feature_schema_error_handler(request: Request, exc: FeatureSchemaError):
