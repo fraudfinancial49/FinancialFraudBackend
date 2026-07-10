@@ -14,7 +14,7 @@ from app.services import ml_service, graph_service as graph_svc_module
 from app.routers import auth, transactions, vault, honeypot, admin, ops
 import logging
 import os
-import gdown
+
 import zipfile
 from fastapi import FastAPI, Request, status
 # ... (rest of your existing imports)
@@ -30,26 +30,35 @@ logger = logging.getLogger("main")
 
 app = FastAPI(title=settings.APP_NAME, version=settings.APP_VERSION)
 
-# --- Google Drive Artifact Sync ---
-def sync_artifacts_from_drive():
-    """Downloads and extracts artifacts from Google Drive if not present."""
-    target_dir = "/srv/artifacts"
-    if not os.path.exists(target_dir):
-        logger.info("Artifacts missing. Downloading from Google Drive...")
-        # Your specific folder ID
-        folder_id = "1TdJH1WgFHKez7LFVanC2Ixag82nza8uN"
-        # Since you are downloading a folder/zip, we use the public drive link
-        url = f"https://drive.google.com/uc?id={folder_id}&export=download"
-        output_zip = '/srv/artifacts.zip'
-        
-        gdown.download(url, output_zip, quiet=False)
-        
-        with zipfile.ZipFile(output_zip, 'r') as zip_ref:
-            zip_ref.extractall('/srv')
-        logger.info("Artifacts successfully synchronized.")
-    else:
-        logger.info("Artifacts already present. Skipping download.")
+from huggingface_hub import snapshot_download
 
+
+
+logger = logging.getLogger("startup")
+def sync_artifacts():
+    """Syncs the artifacts folder from Hugging Face."""
+
+    target_dir = "/srv/artifacts"
+
+    logger.info("Syncing artifacts from Hugging Face...")
+
+    
+
+    # This downloads the repo structure to /srv/artifacts
+
+    snapshot_download(
+
+        repo_id="yff49/financialfraudmodel", # CHANGE THIS
+
+        local_dir=target_dir,
+
+        token=os.getenv("HF_TOKEN"), # Ensure this is in Render Env Vars
+
+        ignore_patterns=["*.git*"]
+
+    )
+
+    logger.info("Artifacts successfully synchronized from Hugging Face.")
 # --- Middleware & Routes ---
 app.add_middleware(
     CORSMiddleware, allow_origins=settings.CORS_ORIGINS, allow_credentials=True,
