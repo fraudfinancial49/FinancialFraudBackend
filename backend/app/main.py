@@ -48,7 +48,7 @@ def sync_artifacts():
 
     snapshot_download(
 
-        repo_id="yff49/financialfraudmodel", # CHANGE THIS
+        repo_id="ff49/financialfraudmodel", # CHANGE THIS
 
         local_dir=target_dir,
 
