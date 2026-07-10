@@ -101,7 +101,13 @@ def fuse(
     scale = (1.0 - THREAT_SCORE_SUPPLEMENTAL_WEIGHT) / phase3_weight_sum
     fused_0_1 = sum(components[k] * weights.get(k, 0.0) * scale for k in components)
     fused_0_1 += (threat_score / 100.0) * THREAT_SCORE_SUPPLEMENTAL_WEIGHT
-    logger.info("calibrated_probabilities=%s trust_risk=%.4f behavioral_risk=%.4f graph_risk=%.4f threat_score=%.4f weights=%s", calibrated_probabilities, trust_risk, behavioral_risk, graph_snapshot["graph_risk"], threat_score, registry.fusion_weights)
+    
+    # FIXED: Replaced external variable scopes with local parameters
+    logger.info(
+        "calibrated_probabilities=%s trust_risk=%.4f behavioral_risk=%.4f graph_risk=%.4f threat_score=%.4f weights=%s", 
+        calibrated_probabilities, trust_risk, behavioral_risk, graph_risk, threat_score, weights
+    )
+    
     return float(min(max(fused_0_1 * 100.0, 0.0), 100.0))
 
 
