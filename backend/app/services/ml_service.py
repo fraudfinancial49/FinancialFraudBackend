@@ -1,26 +1,22 @@
 """
-Loads every frozen Phase 3 artifact EXACTLY ONCE at process startup and never
-retrains, refits, or mutates any of them.
+Loads Phase 3 artifacts from Hugging Face Hub using a transient, lazy-loading 
+strategy to prevent Out-Of-Memory (OOM) crashes on 512MB RAM limits.
 
-Rewritten to natively match the real `artifacts/phase3/` tree:
-  - Models + isotonic calibrators live under `artifacts/phase3/models/`.
-  - There is NO `best_model.joblib` bundle and NO `hybrid_risk_engine.joblib`
-    on disk -- those files never existed. Every piece of equivalent metadata
-    (champion model name, tree/deep feature-column order, fusion weights,
-    threshold strategy, etc.) is parsed directly out of the single
-    `phase3_metadata_registry.json` file Phase 3 Block 9 actually writes.
-  - `feature_names_in_` on the loaded estimators is kept ONLY as a fallback
-    cross-check if the registry's column lists are ever empty -- the registry
-    itself (ground truth straight from the Phase 3 run) is preferred.
+- Lightweight artifacts (Metadata, Scalers, Encoders) are kept in RAM.
+- Heavy artifacts (Models, Calibrators, SHAP Explainers) are loaded strictly 
+  on-demand per transaction, evaluated, and immediately garbage-collected.
 """
 import os
 import json
 import logging
+import gc
 from typing import Dict, List, Optional
 
 import joblib
 import numpy as np
 import pandas as pd
+from huggingface_hub import hf_hub_download
+from huggingface_hub.utils import EntryNotFoundError
 
 from app.core.config import settings
 
@@ -31,25 +27,20 @@ TREE_MODELS = {"random_forest", "xgboost", "lightgbm", "isolation_forest"}
 
 
 class ShapExplainerError(Exception):
-    """Raised when a live, single-transaction SHAP explanation cannot be computed:
-    the `shap_explainer.joblib` artifact is missing, the tree-feature column order
-    is unresolved, or the live feature vector cannot be safely aligned to it. Maps
-    to HTTP 503 at the router layer -- this is a service-availability problem, not
-    a client request-validation problem.
-    """
+    """Raised when a live, single-transaction SHAP explanation cannot be computed."""
 
 
 class ModelRegistry:
-    """Container for every loaded Phase 3 artifact + the metadata registry."""
+    """Container for transient Phase 3 artifact loading + persistent metadata."""
 
     def __init__(self) -> None:
-        self.models: Dict[str, object] = {}
-        self.calibrators: Dict[str, object] = {}
+        # Lightweight components kept in RAM
         self.deep_scaler = None
         self.label_encoder = None
         self.metadata: Dict[str, object] = {}
         self.phase2_schema: Dict[str, object] = {}
         self.model_metrics: Optional[pd.DataFrame] = None
+        
         self.tree_feature_cols: List[str] = []
         self.deep_feature_cols: List[str] = []
         self.model_matrix_kind: Dict[str, str] = {}
@@ -59,38 +50,33 @@ class ModelRegistry:
         self.champion_model: str = "random_forest"
         self.trust_score_range: List[float] = [0.0, 100.0]
         self.behavioral_risk_score_range: List[float] = [0.0, 5.0]
-        self.explainer = None  # frozen Phase 3 SHAP TreeExplainer, for live per-transaction XAI
         self.loaded: bool = False
 
-    # --- path helpers --------------------------------------------------------
-    def _phase3_path(self, filename: str) -> str:
-        return os.path.join(settings.PHASE3_ARTIFACTS_DIR, filename)
+        # Hugging Face Configuration
+        self.repo_id = "ff49/financialfraudmodel"  # UPDATE if your repo name differs
+        self.token = os.getenv("HF_TOKEN")
 
-    def _phase2_path(self, filename: str) -> str:
-        return os.path.join(settings.PHASE2_ARTIFACTS_DIR, filename)
+    def _fetch_artifact(self, repo_filepath: str) -> str:
+        """Downloads/Locates a file from HF Hub and returns the local cache path."""
+        return hf_hub_download(repo_id=self.repo_id, filename=repo_filepath, token=self.token)
 
-    def _phase1_path(self, filename: str) -> str:
-        return os.path.join(settings.PHASE1_ARTIFACTS_DIR, filename)
-
-    def _model_path(self, filename: str) -> str:
-        return os.path.join(settings.PHASE3_MODELS_DIR, filename)
+    def _fetch_optional_artifact(self, repo_filepath: str) -> Optional[str]:
+        """Safely attempts to fetch an artifact that might not exist (e.g., calibrators)."""
+        try:
+            return self._fetch_artifact(repo_filepath)
+        except (EntryNotFoundError, Exception):
+            return None
 
     def load(self) -> None:
-        """Load all Phase 3 artifacts natively from the real directory tree.
-        Raises if any required file is missing -- Phase 4 must never silently
-        serve with a partial/corrupt model set."""
-
-        # --- 1) Metadata registry: the single source of truth for champion
-        # model name, feature-column order, and fusion weights. ---
-        metadata_path = self._phase3_path(settings.PHASE3_METADATA_REGISTRY_FILE)
-        if not os.path.isfile(metadata_path):
-            raise FileNotFoundError(
-                f"Required Phase 3 artifact missing: {metadata_path}. Phase 4 reads the "
-                f"champion model name, feature-column order, and fusion weights directly "
-                f"out of this file -- it does not retrain or reconstruct them."
-            )
-        with open(metadata_path) as f:
-            self.metadata = json.load(f)
+        """Loads strictly the lightweight metadata and schemas at process startup."""
+        
+        # --- 1) Metadata registry ---
+        try:
+            metadata_path = self._fetch_artifact("artifacts/phase3/phase3_metadata_registry.json")
+            with open(metadata_path) as f:
+                self.metadata = json.load(f)
+        except Exception as e:
+            raise FileNotFoundError(f"Required Phase 3 metadata missing from HF Hub: {str(e)}")
 
         self.tree_feature_cols = list(self.metadata.get("tree_feature_cols", []))
         self.deep_feature_cols = list(self.metadata.get("deep_feature_cols", []))
@@ -100,105 +86,136 @@ class ModelRegistry:
         self.fusion_signal_names = list(self.metadata.get("fusion_signal_names", []))
         self.champion_model = str(self.metadata.get("champion_model", "random_forest"))
 
-        # --- 2) Phase 2 schema registry: gives the frozen trust_score /
-        # behavioral_risk_score ranges needed to min-max scale those two
-        # signals into fusion, exactly as Phase 3 Block 7 did. ---
-        phase2_schema_path = self._phase2_path(settings.PHASE2_SCHEMA_REGISTRY_FILE)
-        if os.path.isfile(phase2_schema_path):
+        # --- 2) Phase 2 schema registry ---
+        phase2_schema_path = self._fetch_optional_artifact("artifacts/phase2/schema_registry.json")
+        if phase2_schema_path:
             with open(phase2_schema_path) as f:
                 self.phase2_schema = json.load(f)
-            self.trust_score_range = list(
-                self.phase2_schema.get("trust_score_range", self.trust_score_range)
-            )
-            self.behavioral_risk_score_range = list(
-                self.phase2_schema.get("behavioral_risk_score_range", self.behavioral_risk_score_range)
-            )
+            self.trust_score_range = list(self.phase2_schema.get("trust_score_range", self.trust_score_range))
+            self.behavioral_risk_score_range = list(self.phase2_schema.get("behavioral_risk_score_range", self.behavioral_risk_score_range))
         else:
-            logger.warning(
-                "Phase 2 schema_registry.json not found at %s -- falling back to default "
-                "trust/behavioral risk ranges for fusion normalization.", phase2_schema_path,
-            )
+            logger.warning("Phase 2 schema_registry.json not found -- falling back to default ranges.")
 
-        # --- 3) Models + isotonic calibrators, from artifacts/phase3/models/ ---
-        for name in settings.MODEL_NAMES:
-            model_path = self._model_path(f"{name}.joblib")
-            if not os.path.isfile(model_path):
-                raise FileNotFoundError(
-                    f"Required Phase 3 artifact missing: {model_path}. Phase 4 does not "
-                    f"retrain models -- artifacts/phase3/models/ must be populated."
-                )
-            self.models[name] = joblib.load(model_path)
+        # --- 3) Deep Matrix scaler ---
+        scaler_path = self._fetch_optional_artifact("artifacts/phase3/deep_matrix_scaler.joblib")
+        if scaler_path:
+            self.deep_scaler = joblib.load(scaler_path)
 
-            calibrator_path = self._model_path(f"{name}{settings.ISOTONIC_CALIBRATOR_SUFFIX}")
-            if os.path.isfile(calibrator_path):
-                self.calibrators[name] = joblib.load(calibrator_path)
-            else:
-                logger.warning(
-                    "Isotonic calibrator missing for '%s' at %s -- serving raw (uncalibrated) "
-                    "scores for this engine.", name, calibrator_path,
-                )
+        # --- 4) Label encoder ---
+        encoder_path = self._fetch_optional_artifact("artifacts/phase3/label_encoder.joblib")
+        if not encoder_path:
+            encoder_path = self._fetch_optional_artifact("artifacts/phase1/label_encoder.joblib")
+        if encoder_path:
+            self.label_encoder = joblib.load(encoder_path)
 
-        # --- 4) Deep Matrix scaler (replaces the old, nonexistent mlp_scaler.joblib
-        # -- Phase 3 fits ONE scaler shared by both deep-matrix models). ---
-        self.deep_scaler = joblib.load(self._phase3_path(settings.PHASE3_DEEP_SCALER_FILE))
+        # --- 5) Metric panel ---
+        metrics_path = self._fetch_optional_artifact("artifacts/phase3/baseline_metric_panel.csv")
+        if metrics_path:
+            self.model_metrics = pd.read_csv(metrics_path, index_col=0)
 
-        # --- 5) Label encoder: prefer the Phase 3 re-persisted copy, fall back to
-        # Phase 1's original. ---
-        label_encoder_path = self._phase3_path(settings.PHASE3_LABEL_ENCODER_FILE)
-        if not os.path.isfile(label_encoder_path):
-            label_encoder_path = self._phase1_path(settings.PHASE1_LABEL_ENCODER_FILE)
-        self.label_encoder = joblib.load(label_encoder_path) if os.path.isfile(label_encoder_path) else None
-
-        # --- 6) Metric panel (replaces the old, nonexistent model_metrics.csv) ---
-        metrics_path = self._phase3_path(settings.PHASE3_BASELINE_METRIC_PANEL_FILE)
-        self.model_metrics = pd.read_csv(metrics_path, index_col=0) if os.path.isfile(metrics_path) else None
-
-        # --- 7) Fallback feature-column resolution, only if the registry ever
-        # ships an empty list (defensive; should not happen against a real
-        # Phase 3 export). ---
-        if not self.tree_feature_cols:
-            self.tree_feature_cols = self._resolve_feature_cols_from_models(TREE_MODELS)
-        if not self.deep_feature_cols:
-            self.deep_feature_cols = self._resolve_feature_cols_from_models(DEEP_MODELS)
-
-        # --- 8) Real-time XAI deployment hook: the champion model's fitted SHAP
-        # TreeExplainer, loaded once so live single-transaction requests can be
-        # explained without re-fitting anything. Missing this one artifact must
-        # never block the rest of the API from starting. ---
-        shap_explainer_path = self._phase3_path(settings.PHASE3_SHAP_EXPLAINER_FILE)
-        if os.path.isfile(shap_explainer_path):
-            self.explainer = joblib.load(shap_explainer_path)
-            logger.info(
-                "Loaded live SHAP TreeExplainer (champion=%s) from %s for real-time XAI serving.",
-                self.champion_model, shap_explainer_path,
-            )
-        else:
-            self.explainer = None
-            logger.warning(
-                "SHAP explainer artifact not found at %s -- POST /explain will return 503 "
-                "until artifacts/phase3/shap_explainer.joblib is present.", shap_explainer_path,
-            )
+        # --- 6) Fallback feature-column resolution ---
+        if not self.tree_feature_cols or not self.deep_feature_cols:
+            logger.info("Feature columns missing from metadata. Running transient fallback resolution...")
+            self._resolve_feature_cols_fallback()
 
         self.loaded = True
         logger.info(
-            "ModelRegistry loaded: %d engines, %d calibrators, tree_cols=%d, deep_cols=%d, "
-            "champion_model=%s, fusion_signals=%s, shap_loaded=%s",
-            len(self.models), len(self.calibrators), len(self.tree_feature_cols),
-            len(self.deep_feature_cols), self.champion_model, self.fusion_signal_names,
-            self.explainer is not None,
+            "ModelRegistry Base loaded: tree_cols=%d, deep_cols=%d, champion_model=%s",
+            len(self.tree_feature_cols), len(self.deep_feature_cols), self.champion_model,
         )
 
-    def _resolve_feature_cols_from_models(self, model_names: set) -> List[str]:
-        for name in model_names:
-            model = self.models.get(name)
-            cols = getattr(model, "feature_names_in_", None)
-            if cols is not None:
-                return list(cols)
-        return []
+    def _resolve_feature_cols_fallback(self) -> None:
+        """Loads one tree and one deep model briefly just to extract column names, then deletes them."""
+        if not self.tree_feature_cols:
+            path = self._fetch_optional_artifact("artifacts/phase3/models/random_forest.joblib")
+            if path:
+                model = joblib.load(path)
+                self.tree_feature_cols = list(getattr(model, "feature_names_in_", []))
+                del model
+        
+        if not self.deep_feature_cols:
+            path = self._fetch_optional_artifact("artifacts/phase3/models/logistic_regression.joblib")
+            if path:
+                model = joblib.load(path)
+                self.deep_feature_cols = list(getattr(model, "feature_names_in_", []))
+                del model
+        gc.collect()
 
-    def isolation_forest_unified_score(self, X_tree: pd.DataFrame) -> float:
-        """[0, 1]-scaled pseudo-probability for Isolation Forest, matching Phase
-        3 Block 5's `unified_score` convention (higher = more anomalous). Phase 3's
+    @staticmethod
+    def _positive_class_shap_row(raw_shap) -> np.ndarray:
+        if isinstance(raw_shap, list):
+            arr = np.asarray(raw_shap[1])
+        else:
+            arr = np.asarray(raw_shap)
+            if arr.ndim == 3:
+                arr = arr[:, :, 1]
+        return arr[0]
+
+    def compute_live_shap(self, transaction_features: Dict[str, float]) -> Dict[str, float]:
+        """Compute SHAP using a strictly transient Explainer to save RAM."""
+        if not self.tree_feature_cols:
+            raise ShapExplainerError("Tree feature column order is unresolved.")
+
+        explainer_path = self._fetch_optional_artifact("artifacts/phase3/shap_explainer.joblib")
+        if not explainer_path:
+            raise ShapExplainerError("Live SHAP explainer missing from HF Hub.")
+
+        # Transient Load
+        explainer = joblib.load(explainer_path)
+
+        row = {col: float(transaction_features.get(col, 0.0)) for col in self.tree_feature_cols}
+        matrix = pd.DataFrame([row], columns=self.tree_feature_cols)
+
+        raw_shap = explainer.shap_values(matrix)
+        fraud_vector = self._positive_class_shap_row(raw_shap)
+        contributions = {col: float(val) for col, val in zip(self.tree_feature_cols, fraud_vector)}
+        
+        # Explicit Memory Cleanup
+        del explainer
+        gc.collect()
+
+        return dict(sorted(contributions.items(), key=lambda kv: abs(kv[1]), reverse=True))
+
+    def predict_proba_all(self, X_tree: pd.DataFrame, X_deep_scaled: pd.DataFrame) -> Dict[str, float]:
+        """
+        Runs all 6 Phase 3 engines sequentially. 
+        Loads a model, predicts, and explicitly purges it from RAM to avoid OOM crashes.
+        """
+        out: Dict[str, float] = {}
+        
+        for name in settings.MODEL_NAMES:
+            model_path = self._fetch_artifact(f"artifacts/phase3/models/{name}.joblib")
+            calibrator_path = self._fetch_optional_artifact(f"artifacts/phase3/models/{name}{settings.ISOTONIC_CALIBRATOR_SUFFIX}")
+            
+            # Transient Load
+            model = joblib.load(model_path)
+            calibrator = joblib.load(calibrator_path) if calibrator_path else None
+
+            # Prediction Logic
+            if name == "isolation_forest":
+                raw_score = -model.decision_function(X_tree)[0]
+                unified_score = float(1.0 / (1.0 + np.exp(-raw_score)))
+                out[name] = float(calibrator.predict([unified_score])[0]) if calibrator else unified_score
+            else:
+                input_data = X_deep_scaled if name in DEEP_MODELS else X_tree
+                raw_prob = float(model.predict_proba(input_data)[:, 1][0])
+                out[name] = float(calibrator.predict([raw_prob])[0]) if calibrator else raw_prob
+
+            # Explicit Memory Cleanup
+            del model
+            if calibrator:
+                del calibrator
+            gc.collect()
+
+        return out
+
+    @property
+    def best_model_name(self) -> str:
+        return self.champion_model
+
+
+registry = ModelRegistry()
+higher = more anomalous). Phase 3's
         exact train-fit min/max normalization bounds are not persisted anywhere in
         `phase3_metadata_registry.json`, so this uses a documented, monotone
         sigmoid-squash approximation of the same raw anomaly signal instead --
