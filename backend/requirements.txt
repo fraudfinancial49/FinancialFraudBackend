@@ -16,8 +16,7 @@ shap==0.46.0
 pandas==2.2.3
 numpy==1.26.4
 httpx==0.28.1
-gunicorn
-
+huggingface_hub
 gdown
 python-multipart
 pydantic[email]
