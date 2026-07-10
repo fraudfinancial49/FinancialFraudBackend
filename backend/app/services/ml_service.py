@@ -53,7 +53,7 @@ class ModelRegistry:
         self.loaded: bool = False
 
         # Hugging Face Configuration
-        self.repo_id = "ff49/financialfraudmodel"  # UPDATE if your repo name differs
+        self.repo_id = "ff49/financialfraudmodel"  # Matches your HF Repo
         self.token = os.getenv("HF_TOKEN")
 
     def _fetch_artifact(self, repo_filepath: str) -> str:
@@ -178,7 +178,7 @@ class ModelRegistry:
 
     def predict_proba_all(self, X_tree: pd.DataFrame, X_deep_scaled: pd.DataFrame) -> Dict[str, float]:
         """
-        Runs all 6 Phase 3 engines sequentially. 
+        Runs all Phase 3 engines sequentially. 
         Loads a model, predicts, and explicitly purges it from RAM to avoid OOM crashes.
         """
         out: Dict[str, float] = {}
@@ -215,101 +215,4 @@ class ModelRegistry:
 
 
 registry = ModelRegistry()
-higher = more anomalous). Phase 3's
-        exact train-fit min/max normalization bounds are not persisted anywhere in
-        `phase3_metadata_registry.json`, so this uses a documented, monotone
-        sigmoid-squash approximation of the same raw anomaly signal instead --
-        the ordering and the calibrator fit on top of it are unaffected by this
-        substitution, only the pre-calibration scale is approximate."""
-        model = self.models["isolation_forest"]
-        raw = -model.decision_function(X_tree)[0]  # higher raw = more anomalous
-        return float(1.0 / (1.0 + np.exp(-raw)))
-
-    @staticmethod
-    def _positive_class_shap_row(raw_shap) -> np.ndarray:
-        """Normalize a single-row `TreeExplainer.shap_values()` result -- which may
-        come back as a length-2 list of 2D arrays, a 3D `(n_samples, n_features,
-        n_classes)` array, or already a plain 2D `(n_samples, n_features)` array
-        depending on the installed shap/sklearn version -- down to one clean 1D
-        positive-class (fraud) vector. Mirrors Phase 3 Block 8's
-        `shap_positive_class_matrix` helper exactly, so the live serving path and
-        the offline analysis notebook never disagree about output shape."""
-        if isinstance(raw_shap, list):
-            arr = np.asarray(raw_shap[1])
-        else:
-            arr = np.asarray(raw_shap)
-            if arr.ndim == 3:
-                arr = arr[:, :, 1]
-        return arr[0]
-
-    def compute_live_shap(self, transaction_features: Dict[str, float]) -> Dict[str, float]:
-        """Compute real-time, per-transaction SHAP contributions for the positive
-        (fraud) class using the frozen Phase 3 TreeExplainer.
-
-        `transaction_features` is a flat {column_name: value} dict for ONE
-        transaction -- typically the exact tree-feature vector already persisted
-        on that transaction's `ModelPrediction.tree_feature_vector` row. This
-        method never trusts the caller's key set or ordering: it defensively
-        reindexes onto `self.tree_feature_cols` (from `phase3_metadata_registry.json`),
-        filling any absent column with 0.0 and silently dropping any extra key,
-        before building the 2D matrix SHAP requires.
-
-        Returns a dict of {feature_name: shap_value}, sorted by absolute
-        contribution magnitude descending -- the most decision-relevant features
-        (whichever direction they push) surface first, matching the case-level
-        "why was this flagged" view a fraud analyst needs.
-        """
-        if self.explainer is None:
-            raise ShapExplainerError(
-                "Live SHAP explainer is not loaded -- artifacts/phase3/shap_explainer.joblib "
-                "is missing. Real-time XAI is unavailable until this artifact exists."
-            )
-        if not self.tree_feature_cols:
-            raise ShapExplainerError(
-                "Tree feature column order is unresolved -- neither phase3_metadata_registry.json "
-                "nor any loaded tree model's feature_names_in_ produced a column list. Refusing to "
-                "build an unaligned SHAP matrix."
-            )
-
-        row = {col: float(transaction_features.get(col, 0.0)) for col in self.tree_feature_cols}
-        matrix = pd.DataFrame([row], columns=self.tree_feature_cols)
-
-        raw_shap = self.explainer.shap_values(matrix)
-        fraud_vector = self._positive_class_shap_row(raw_shap)
-
-        contributions = {col: float(val) for col, val in zip(self.tree_feature_cols, fraud_vector)}
-        return dict(sorted(contributions.items(), key=lambda kv: abs(kv[1]), reverse=True))
-
-    def _calibrated_score(self, name: str, unified_score: float) -> float:
-        """Applies the frozen isotonic calibrator for `name` on top of its raw
-        [0, 1] unified score -- exactly mirroring Phase 3 Block 6's
-        `test_scores_calibrated`, the same calibrated scores `fusion_weights`
-        were objectively fit against (inverse-Brier). Falls back to the raw
-        score if a calibrator is missing for this engine."""
-        calibrator = self.calibrators.get(name)
-        if calibrator is None:
-            return unified_score
-        return float(calibrator.predict([unified_score])[0])
-
-    def predict_proba_all(self, X_tree: pd.DataFrame, X_deep_scaled: pd.DataFrame) -> Dict[str, float]:
-        """Run every one of the 6 frozen Phase 3 engines and return
-        {model_name: calibrated_fraud_probability}, matching the exact
-        `test_scores_calibrated` convention `fusion_weights` were fit on."""
-        out: Dict[str, float] = {}
-        for name in ("random_forest", "xgboost", "lightgbm"):
-            raw = float(self.models[name].predict_proba(X_tree)[:, 1][0])
-            out[name] = self._calibrated_score(name, raw)
-        for name in ("logistic_regression", "mlp"):
-            raw = float(self.models[name].predict_proba(X_deep_scaled)[:, 1][0])
-            out[name] = self._calibrated_score(name, raw)
-        out["isolation_forest"] = self._calibrated_score(
-            "isolation_forest", self.isolation_forest_unified_score(X_tree)
-        )
-        return out
-
-    @property
-    def best_model_name(self) -> str:
-        return self.champion_model
-
-
-registry = ModelRegistry()
+      
