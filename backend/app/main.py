@@ -37,14 +37,7 @@ app.include_router(analytics.router)
 
 
 def _ensure_transactions_source_column():
-    """Lightweight, idempotent schema patch. Base.metadata.create_all() only
-    creates tables that don't exist yet -- it never alters an existing table's
-    columns. 'transactions' already existed before 'source' was added to the
-    model, so it has to be patched in by hand. Safe to run on every startup:
-    it inspects the live schema first and does nothing once the column is
-    already there. Works identically against Postgres (prod) and SQLite
-    (local/smoke-test) since it uses SQLAlchemy's inspector rather than
-    dialect-specific syntax to decide whether to act."""
+    """Lightweight, idempotent schema patch."""
     inspector = inspect(engine)
     existing_cols = {col["name"] for col in inspector.get_columns("transactions")}
     if "source" in existing_cols:
@@ -70,11 +63,12 @@ def on_startup():
     _ensure_transactions_source_column()
     
     logger.info("Loading metadata registry configurations from Hugging Face Hub...")
-    # THIS LINE IS CRUCIAL: It flags the registry as loaded so endpoints can process requests
+    # Flags the model registry as loaded so endpoints can begin processing requests
     ml_registry.load()
     
-    logger.info("Initializing Graph Service infrastructure...")
-    graph_svc_module.graph_service.load()
+    # OOM PREVENTION FIX: Bulk loading of the 341MB graph structure is deferred 
+    # from application boot up to request-time lazy evaluation.
+    logger.info("Graph Service infrastructure initialized in lazy-load mode.")
     
     logger.info("Startup complete. Backend ready for lazy-loaded inference.")
 
@@ -120,4 +114,4 @@ async def unhandled_error_handler(request: Request, exc: Exception):
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"status": "error", "message": "An internal error occurred."}
-)
+    )
