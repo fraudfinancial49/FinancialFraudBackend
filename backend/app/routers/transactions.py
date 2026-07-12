@@ -1,8 +1,9 @@
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, date
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 
 from app.db.base import get_db
@@ -10,15 +11,16 @@ from app.db import models
 from app.core.deps import get_current_user, require_roles
 from app.schemas.schemas import (
     TransactionAssessRequest, TransactionAssessResponse, TransactionExplainResponse,
+    TransactionListItem, TransactionListResponse,
 )
 from app.services import ml_service, feature_pipeline, graph_service as graph_svc_module
 from app.services import behavioral_service, trust_service, risk_fusion
 from app.services.ml_service import ShapExplainerError
 from app.core.config import settings
 from app.routers.analytics import _date_bounds
+
 logger = logging.getLogger("transactions_router")
 router = APIRouter(prefix="/api/v1/transactions", tags=["transactions"])
-
 
 @router.post("/assess", response_model=TransactionAssessResponse)
 def assess_transaction(
