@@ -1,42 +1,7 @@
-"""
-Loads the Phase 2 `artifacts/phase2/graph_weight_maps.joblib` bundle ONCE at
-server startup.
-
-IMPORTANT -- Phase 2 no longer builds or exports a `networkx.DiGraph` at all
-(the current Phase 2 notebook runs its causal graph forensics entirely on the
-C-backed `igraph` engine, and only ever persists a plain dict of *derived*
-per-account metrics + community assignments -- there is no `transaction_graph.joblib`
-anywhere in the real artifact tree). This service is rewritten around what
-Phase 2 actually ships in `graph_weight_maps.joblib`:
-
-    {
-        "account_graph_metrics": pd.DataFrame indexed by account, columns
-            [graph_out_degree, graph_pagerank, graph_hub_score,
-             graph_authority_score, community_id],
-        "community_sizes": {community_id: size},
-        "modularity_score": float,
-        "n_communities": int,
-        "leiden_resolution": float,
-        "trust_weights": {...},
-        "risk_weights": {...},
-    }
-
-This is a FROZEN, static snapshot (built train-only, causally, offline) --
-Phase 4 never mutates it. Accounts unseen in that snapshot (cold-start: only
-ever observed in the validation tail or test partition, or brand-new since)
-resolve to the same 0.0 / community_id -1 convention Phase 2 itself uses.
-
-Live-serving still needs *some* incremental, in-memory bookkeeping for
-freshly-observed transactions between requests -- but since there is no live
-graph object to append an edge to anymore, this service instead keeps a
-lightweight per-account transaction/degree counter of its own, entirely
-separate from the frozen Phase 2 snapshot, periodically persisted to Phase
-4's own `RUNTIME_STATE_DIR` (never written back into the Drive artifact tree).
-"""
 import os
 import logging
 import threading
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import joblib
 import numpy as np
@@ -53,7 +18,10 @@ GRAPH_METRIC_COLS = ["graph_out_degree", "graph_pagerank", "graph_hub_score", "g
 
 class GraphService:
     def __init__(self) -> None:
-        self.account_graph_metrics: Optional[pd.DataFrame] = None
+        # No full DataFrame held in RAM anymore -- replaced by a lean per-account
+        # dict of small tuples, built once at load time then the DataFrame and
+        # the raw joblib payload are dropped immediately.
+        self._account_metrics: Dict[str, Tuple[float, float, float, float, int]] = {}
         self.community_sizes: Dict[int, int] = {}
         self.modularity_score: float = float("nan")
         self.n_communities: int = 0
@@ -67,8 +35,6 @@ class GraphService:
         self._edges_since_persist = 0
         self.loaded = False
 
-        # Same Hugging Face repo Phase 3's ml_service.py already pulls from --
-        # graph_weight_maps.joblib lives there too, at artifacts/phase2/.
         self.repo_id = "ff49/financialfraudmodel"
         self.token = os.getenv("HF_TOKEN")
 
@@ -76,9 +42,6 @@ class GraphService:
         return os.path.join(settings.RUNTIME_STATE_DIR, settings.LIVE_GRAPH_STATE_FILE)
 
     def _fetch_phase2_artifact(self) -> Optional[str]:
-        """Downloads/locates graph_weight_maps.joblib from HF Hub. Render's
-        filesystem is ephemeral -- there is no local Phase 2 artifact tree to
-        read from, so this replaces the old local-path lookup entirely."""
         repo_filepath = os.path.join(
             settings.PHASE2_ARTIFACTS_SUBDIR, settings.PHASE2_GRAPH_WEIGHT_MAPS_FILE
         ).replace(os.sep, "/")
@@ -92,20 +55,40 @@ class GraphService:
         path = self._fetch_phase2_artifact()
         if path is not None:
             weight_maps = joblib.load(path)
-            self.account_graph_metrics = weight_maps.get("account_graph_metrics")
+            df = weight_maps.get("account_graph_metrics")
             self.community_sizes = weight_maps.get("community_sizes", {})
             self.modularity_score = float(weight_maps.get("modularity_score", float("nan")))
             self.n_communities = int(weight_maps.get("n_communities", 0))
             self.trust_weights = weight_maps.get("trust_weights", {})
             self.risk_weights = weight_maps.get("risk_weights", {})
-            n_accounts = len(self.account_graph_metrics) if self.account_graph_metrics is not None else 0
-            logger.info(
-                "Loaded frozen Phase 2 graph_weight_maps.joblib from HF Hub: %d accounts, %d communities, "
-                "modularity=%.4f.", n_accounts, self.n_communities, self.modularity_score,
-            )
-            self._fit_metric_bounds()
+
+            if df is not None and not df.empty:
+                self._fit_metric_bounds(df)
+                # Collapse to plain float32/int32 tuples -- a pandas DataFrame
+                # with its Index, dtype overhead, and block manager costs far
+                # more RAM per row than a dict of primitive tuples does.
+                for col in GRAPH_METRIC_COLS:
+                    if col not in df.columns:
+                        df[col] = 0.0
+                if "community_id" not in df.columns:
+                    df["community_id"] = -1
+                for account_id, row in zip(
+                    df.index,
+                    df[GRAPH_METRIC_COLS + ["community_id"]].itertuples(index=False, name=None),
+                ):
+                    self._account_metrics[str(account_id)] = (
+                        float(row[0]), float(row[1]), float(row[2]), float(row[3]), int(row[4]),
+                    )
+                n_accounts = len(self._account_metrics)
+                del df, weight_maps  # drop the heavy pandas/joblib payload immediately
+                logger.info(
+                    "Loaded frozen Phase 2 graph metrics from HF Hub: %d accounts, %d communities, "
+                    "modularity=%.4f (lean dict, no resident DataFrame).",
+                    n_accounts, self.n_communities, self.modularity_score,
+                )
+            else:
+                logger.warning("graph_weight_maps.joblib had no account_graph_metrics -- empty snapshot.")
         else:
-            self.account_graph_metrics = pd.DataFrame(columns=GRAPH_METRIC_COLS + ["community_id"])
             logger.warning(
                 "graph_weight_maps.joblib unavailable from HF Hub repo %s -- serving with an empty "
                 "frozen graph snapshot (every account will resolve as cold-start).", self.repo_id,
@@ -114,22 +97,12 @@ class GraphService:
         self._load_live_state()
         self.loaded = True
 
-    # ... _fit_metric_bounds, _load_live_state, persist, add_edge_incremental,
-    # _static_metrics_for, _community_size, _minmax, account_risk_snapshot
-    # all stay exactly as they are, unchanged.
-
-    def _fit_metric_bounds(self) -> None:
-        """Per-column min/max across the frozen account snapshot -- used to
-        min-max scale the composite `graph_risk` fusion signal. Phase 3's exact
-        train-fit-slice bounds for this scaler are not persisted anywhere in
-        `phase3_metadata_registry.json`, so this is a documented, closest-available
-        approximation computed once, at load time, off the same frozen accounts."""
-        if self.account_graph_metrics is None or self.account_graph_metrics.empty:
-            return
+    def _fit_metric_bounds(self, df: pd.DataFrame) -> None:
+        """Same as before, computed once off the DataFrame before it's discarded."""
         for col in GRAPH_METRIC_COLS:
-            if col in self.account_graph_metrics.columns:
-                self._metric_min[col] = float(self.account_graph_metrics[col].min())
-                self._metric_max[col] = float(self.account_graph_metrics[col].max())
+            if col in df.columns:
+                self._metric_min[col] = float(df[col].min())
+                self._metric_max[col] = float(df[col].max())
 
     def _load_live_state(self) -> None:
         path = self._live_state_path()
@@ -142,16 +115,11 @@ class GraphService:
                 self._live_edges = {}
 
     def persist(self) -> None:
-        """Persists ONLY the Phase-4-owned live bookkeeping to RUNTIME_STATE_DIR.
-        The frozen Phase 2 `graph_weight_maps.joblib` artifact is never
-        overwritten, moved, or renamed."""
         joblib.dump(self._live_edges, self._live_state_path())
         self._edges_since_persist = 0
         logger.info("Persisted live graph bookkeeping (%d accounts tracked).", len(self._live_edges))
 
     def add_edge_incremental(self, sender: str, receiver: str, amount: float) -> None:
-        """Append/update a single weighted edge in the Phase-4-only live
-        tracker. O(1) -- never touches the frozen Phase 2 snapshot."""
         with self._lock:
             bucket = self._live_edges.setdefault(sender, {})
             edge = bucket.setdefault(receiver, {"weight": 0.0, "tx_count": 0})
@@ -162,22 +130,17 @@ class GraphService:
                 self.persist()
 
     def _static_metrics_for(self, account_id: str) -> Dict[str, float]:
-        """Frozen, structural signals for one account straight out of Phase 2's
-        `account_graph_metrics`. Cold-start accounts (never a node in the
-        pruned, leakage-free train-only graph) resolve to 0.0 / community_id -1,
-        the same convention Phase 2 itself uses for unseen accounts."""
-        if self.account_graph_metrics is None or account_id not in self.account_graph_metrics.index:
+        row = self._account_metrics.get(account_id)
+        if row is None:
             return {
                 "graph_out_degree": 0.0, "graph_pagerank": 0.0,
                 "graph_hub_score": 0.0, "graph_authority_score": 0.0, "community_id": -1,
             }
-        row = self.account_graph_metrics.loc[account_id]
+        out_degree, pagerank, hub, authority, community_id = row
         return {
-            "graph_out_degree": float(row.get("graph_out_degree", 0.0)),
-            "graph_pagerank": float(row.get("graph_pagerank", 0.0)),
-            "graph_hub_score": float(row.get("graph_hub_score", 0.0)),
-            "graph_authority_score": float(row.get("graph_authority_score", 0.0)),
-            "community_id": int(row.get("community_id", -1)),
+            "graph_out_degree": out_degree, "graph_pagerank": pagerank,
+            "graph_hub_score": hub, "graph_authority_score": authority,
+            "community_id": community_id,
         }
 
     def _community_size(self, community_id: int) -> int:
@@ -193,22 +156,13 @@ class GraphService:
         return float(np.clip((value - lo) / (hi - lo), 0.0, 1.0))
 
     def account_risk_snapshot(self, sender: str, receiver: str) -> Dict[str, float]:
-        """Cheap, per-transaction structural signals for a (sender, receiver)
-        pair, using the real Phase 2 feature-naming contract
-        (`sender_graph_*` / `receiver_graph_*` / `*_community_*` /
-        `is_bridge_transaction`) instead of the old, nonexistent
-        `sender_graph_risk_score` / `sender_pagerank` / `sender_betweenness` /
-        `sender_is_bridge_account` names. Also returns a composite `graph_risk`
-        in [0, 1] -- the same signal name `phase3_metadata_registry.json`'s
-        `fusion_weights` expects -- built the same way Phase 3 Block 7 derives
-        it (mean of min-max-scaled sender/receiver graph metrics, nudged up on
-        a bridge transaction)."""
+        # unchanged from before
         sender_metrics = self._static_metrics_for(sender)
         receiver_metrics = self._static_metrics_for(receiver)
 
         sender_community_size = self._community_size(sender_metrics["community_id"])
         receiver_community_size = self._community_size(receiver_metrics["community_id"])
-        min_active = 1  # matches Phase 2's MIN_COMMUNITY_ACTIVE_SIZE floor for a single live check
+        min_active = 1
         sender_active = sender_metrics["community_id"] != -1 and sender_community_size >= min_active
         receiver_active = receiver_metrics["community_id"] != -1 and receiver_community_size >= min_active
         different_communities = sender_metrics["community_id"] != receiver_metrics["community_id"]
