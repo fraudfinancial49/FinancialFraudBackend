@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import gc
 from typing import Dict, Optional, Tuple
 
 import joblib
@@ -18,9 +19,6 @@ GRAPH_METRIC_COLS = ["graph_out_degree", "graph_pagerank", "graph_hub_score", "g
 
 class GraphService:
     def __init__(self) -> None:
-        # No full DataFrame held in RAM anymore -- replaced by a lean per-account
-        # dict of small tuples, built once at load time then the DataFrame and
-        # the raw joblib payload are dropped immediately.
         self._account_metrics: Dict[str, Tuple[float, float, float, float, int]] = {}
         self.community_sizes: Dict[int, int] = {}
         self.modularity_score: float = float("nan")
@@ -33,7 +31,10 @@ class GraphService:
         self._live_edges: Dict[str, Dict[str, Dict[str, float]]] = {}
         self._lock = threading.Lock()
         self._edges_since_persist = 0
+        
+        # Flags whether the remote artifacts have been loaded or skipped due to RAM constraints
         self.loaded = False
+        self.oom_fallback_active = False
 
         self.repo_id = "ff49/financialfraudmodel"
         self.token = os.getenv("HF_TOKEN")
@@ -52,53 +53,68 @@ class GraphService:
             return None
 
     def load(self) -> None:
-        path = self._fetch_phase2_artifact()
-        if path is not None:
-            weight_maps = joblib.load(path)
-            df = weight_maps.get("account_graph_metrics")
-            self.community_sizes = weight_maps.get("community_sizes", {})
-            self.modularity_score = float(weight_maps.get("modularity_score", float("nan")))
-            self.n_communities = int(weight_maps.get("n_communities", 0))
-            self.trust_weights = weight_maps.get("trust_weights", {})
-            self.risk_weights = weight_maps.get("risk_weights", {})
+        """Attempts to load the structural graph metrics from Hugging Face Hub dynamically."""
+        if self.loaded:
+            return
 
-            if df is not None and not df.empty:
-                self._fit_metric_bounds(df)
-                # Collapse to plain float32/int32 tuples -- a pandas DataFrame
-                # with its Index, dtype overhead, and block manager costs far
-                # more RAM per row than a dict of primitive tuples does.
-                for col in GRAPH_METRIC_COLS:
-                    if col not in df.columns:
-                        df[col] = 0.0
-                if "community_id" not in df.columns:
-                    df["community_id"] = -1
-                for account_id, row in zip(
-                    df.index,
-                    df[GRAPH_METRIC_COLS + ["community_id"]].itertuples(index=False, name=None),
-                ):
-                    self._account_metrics[str(account_id)] = (
-                        float(row[0]), float(row[1]), float(row[2]), float(row[3]), int(row[4]),
-                    )
-                n_accounts = len(self._account_metrics)
-                del df, weight_maps  # drop the heavy pandas/joblib payload immediately
-                logger.info(
-                    "Loaded frozen Phase 2 graph metrics from HF Hub: %d accounts, %d communities, "
-                    "modularity=%.4f (lean dict, no resident DataFrame).",
-                    n_accounts, self.n_communities, self.modularity_score,
-                )
-            else:
-                logger.warning("graph_weight_maps.joblib had no account_graph_metrics -- empty snapshot.")
-        else:
-            logger.warning(
-                "graph_weight_maps.joblib unavailable from HF Hub repo %s -- serving with an empty "
-                "frozen graph snapshot (every account will resolve as cold-start).", self.repo_id,
-            )
+        with self._lock:
+            if self.loaded:
+                return
+                
+            try:
+                logger.info("Lazy-loading Graph Service payload from HF Hub...")
+                path = self._fetch_phase2_artifact()
+                if path is not None:
+                    weight_maps = joblib.load(path)
+                    df = weight_maps.get("account_graph_metrics")
+                    self.community_sizes = weight_maps.get("community_sizes", {})
+                    self.modularity_score = float(weight_maps.get("modularity_score", float("nan")))
+                    self.n_communities = int(weight_maps.get("n_communities", 0))
+                    self.trust_weights = weight_maps.get("trust_weights", {})
+                    self.risk_weights = weight_maps.get("risk_weights", {})
 
-        self._load_live_state()
-        self.loaded = True
+                    if df is not None and not df.empty:
+                        self._fit_metric_bounds(df)
+                        for col in GRAPH_METRIC_COLS:
+                            if col not in df.columns:
+                                df[col] = 0.0
+                        if "community_id" not in df.columns:
+                            df["community_id"] = -1
+                            
+                        for account_id, row in zip(
+                            df.index,
+                            df[GRAPH_METRIC_COLS + ["community_id"]].itertuples(index=False, name=None),
+                        ):
+                            self._account_metrics[str(account_id)] = (
+                                float(row[0]), float(row[1]), float(row[2]), float(row[3]), int(row[4]),
+                            )
+                        n_accounts = len(self._account_metrics)
+                        
+                        # Clear memory allocations immediately
+                        del df, weight_maps
+                        gc.collect()
+                        
+                        logger.info(
+                            "Successfully loaded frozen Phase 2 graph metrics: %d accounts.", n_accounts
+                        )
+                    else:
+                        logger.warning("graph_weight_maps.joblib was empty.")
+                else:
+                    logger.warning("Artifact download returned None.")
+                    
+            except (MemoryError, Exception) as exc:
+                # CRITICAL RESILIENCE RAILS: If Render hits memory limits during initialization,
+                # catch the failure, clear out any partial variables, and drop back to safe execution mode.
+                logger.error("RAM headroom exceeded during graph parsing (%s). Activating safe cold-start fallback.", exc)
+                self._account_metrics.clear()
+                self.community_sizes.clear()
+                self.oom_fallback_active = True
+                gc.collect()
+
+            self._load_live_state()
+            self.loaded = True
 
     def _fit_metric_bounds(self, df: pd.DataFrame) -> None:
-        """Same as before, computed once off the DataFrame before it's discarded."""
         for col in GRAPH_METRIC_COLS:
             if col in df.columns:
                 self._metric_min[col] = float(df[col].min())
@@ -109,9 +125,9 @@ class GraphService:
         if os.path.isfile(path):
             try:
                 self._live_edges = joblib.load(path)
-                logger.info("Restored live (Phase-4-only) graph bookkeeping from %s.", path)
+                logger.info("Restored live graph bookkeeping from %s.", path)
             except Exception as exc:
-                logger.warning("Failed to restore live graph state from %s (%s) -- starting fresh.", path, exc)
+                logger.warning("Failed to restore live graph state (%s) -- starting fresh.", exc)
                 self._live_edges = {}
 
     def persist(self) -> None:
@@ -156,7 +172,10 @@ class GraphService:
         return float(np.clip((value - lo) / (hi - lo), 0.0, 1.0))
 
     def account_risk_snapshot(self, sender: str, receiver: str) -> Dict[str, float]:
-        # unchanged from before
+        # Triggers lazy-loading step on request if it has not executed yet
+        if not self.loaded:
+            self.load()
+
         sender_metrics = self._static_metrics_for(sender)
         receiver_metrics = self._static_metrics_for(receiver)
 
@@ -172,8 +191,15 @@ class GraphService:
         for prefix, metrics in (("sender", sender_metrics), ("receiver", receiver_metrics)):
             for col in GRAPH_METRIC_COLS:
                 scaled_vals.append(self._minmax(col, metrics[col]))
+                
         composite = float(np.mean(scaled_vals)) if scaled_vals else 0.0
-        graph_risk = float(np.clip(0.85 * composite + 0.15 * is_bridge_transaction, 0.0, 1.0))
+        
+        # If the fallback is active because the 341MB object couldn't load,
+        # apply a safe fallback weight (5%) so graph risk is gracefully handled.
+        if self.oom_fallback_active:
+            graph_risk = float(0.05 + 0.15 * is_bridge_transaction)
+        else:
+            graph_risk = float(np.clip(0.85 * composite + 0.15 * is_bridge_transaction, 0.0, 1.0))
 
         return {
             "sender_graph_out_degree": sender_metrics["graph_out_degree"],
