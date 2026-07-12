@@ -15,7 +15,7 @@ from app.services import ml_service, feature_pipeline, graph_service as graph_sv
 from app.services import behavioral_service, trust_service, risk_fusion
 from app.services.ml_service import ShapExplainerError
 from app.core.config import settings
-
+from app.routers.analytics import _date_bounds
 logger = logging.getLogger("transactions_router")
 router = APIRouter(prefix="/api/v1/transactions", tags=["transactions"])
 
@@ -227,3 +227,42 @@ def explain_transaction(
     db.commit()
 
     return TransactionExplainResponse(**response_payload)
+
+
+@router.get("", response_model=TransactionListResponse)
+def list_transactions(
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
+    routing_decision: Optional[str] = Query(None, pattern="^(approve|vault|honeypot)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles("analyst", "admin")),
+):
+    start_dt, end_dt = _date_bounds(start_date, end_date)
+
+    base_query = (
+        db.query(models.Transaction, models.ModelPrediction)
+        .join(models.ModelPrediction, models.ModelPrediction.transaction_id == models.Transaction.id)
+        .filter(models.Transaction.timestamp >= start_dt, models.Transaction.timestamp < end_dt)
+    )
+    if routing_decision:
+        base_query = base_query.filter(models.ModelPrediction.routing_decision == routing_decision)
+
+    total = base_query.count()
+    rows = (
+        base_query.order_by(models.Transaction.timestamp.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+    items = [
+        TransactionListItem(
+            transaction_id=tx.id, name_orig=tx.name_orig, name_dest=tx.name_dest,
+            type=tx.type, amount=tx.amount, final_risk_score=pred.final_risk_score,
+            routing_decision=pred.routing_decision, timestamp=tx.timestamp, source=tx.source,
+        )
+        for tx, pred in rows
+    ]
+    return TransactionListResponse(items=items, total=total, page=page, page_size=page_size)
