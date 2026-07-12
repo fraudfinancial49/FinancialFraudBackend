@@ -125,3 +125,46 @@ class AdminRetrainResponse(BaseModel):
     cache_entries_flushed: int
     retrain_run_id: str
     message: str
+
+
+# --- Analytics & transaction history (NEW) ---
+class TransactionAnalyticsSummary(BaseModel):
+    start_date: str
+    end_date: str
+    total_transactions: int
+    total_volume: float
+    approve_count: int
+    vault_count: int
+    honeypot_count: int
+    flagged_count: int
+    fraud_rate: float
+    avg_risk_score: float
+    avg_latency_ms: float
+
+
+class TransactionTimeseriesPoint(BaseModel):
+    date: str
+    total: int
+    approve_count: int
+    vault_count: int
+    honeypot_count: int
+    flagged_count: int
+
+
+class TransactionListItem(BaseModel):
+    transaction_id: str
+    name_orig: str
+    name_dest: str
+    type: str
+    amount: float
+    final_risk_score: float
+    routing_decision: str
+    timestamp: datetime
+    source: str
+
+
+class TransactionListResponse(BaseModel):
+    items: List[TransactionListItem]
+    total: int
+    page: int
+    page_size: int
