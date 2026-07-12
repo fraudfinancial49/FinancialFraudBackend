@@ -1,25 +1,25 @@
+import logging
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Optional, List
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException, status
 from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 
 from app.db.base import get_db
 from app.db import models
 from app.core.deps import require_roles
-from app.schemas.schemas import TransactionAnalyticsSummary, TransactionTimeseriesPoint
+from app.schemas import schemas
 
-router = APIRouter(prefix="/api/v1/analytics", tags=["analytics"])
+logger = logging.getLogger("analytics_router")
+router = APIRouter(prefix="/api/v1", tags=["analytics"])
 
-# Bank-wide analytics are restricted to analyst/admin, same as /explain --
-# a plain "user" role has no business seeing aggregate fraud figures.
+# Bank-wide analytics are restricted to analyst/admin
 _ROLE_DEP = Depends(require_roles("analyst", "admin"))
 
 
 def _date_bounds(start_date: Optional[date], end_date: Optional[date]) -> tuple[datetime, datetime]:
-    """Inclusive [start_date, end_date] -> half-open [start_dt, end_dt) datetime bounds.
-    Defaults to the last 7 days if neither is given."""
+    """Inclusive [start_date, end_date] -> half-open [start_dt, end_dt) datetime bounds."""
     if end_date is None:
         end_date = date.today()
     if start_date is None:
@@ -29,7 +29,7 @@ def _date_bounds(start_date: Optional[date], end_date: Optional[date]) -> tuple[
     return start_dt, end_dt
 
 
-@router.get("/summary", response_model=TransactionAnalyticsSummary)
+@router.get("/analytics/summary", response_model=schemas.TransactionAnalyticsSummary)
 def analytics_summary(
     start_date: Optional[date] = Query(None),
     end_date: Optional[date] = Query(None),
@@ -56,7 +56,7 @@ def analytics_summary(
     flagged_ct = vault_ct + honeypot_ct
     fraud_rate = (flagged_ct / total) if total > 0 else 0.0
 
-    return TransactionAnalyticsSummary(
+    return schemas.TransactionAnalyticsSummary(
         start_date=start_dt.date().isoformat(),
         end_date=(end_dt - timedelta(days=1)).date().isoformat(),
         total_transactions=total,
@@ -71,7 +71,7 @@ def analytics_summary(
     )
 
 
-@router.get("/timeseries", response_model=list[TransactionTimeseriesPoint])
+@router.get("/analytics/timeseries", response_model=List[schemas.TransactionTimeseriesPoint])
 def analytics_timeseries(
     start_date: Optional[date] = Query(None),
     end_date: Optional[date] = Query(None),
@@ -97,7 +97,7 @@ def analytics_timeseries(
     )
 
     return [
-        TransactionTimeseriesPoint(
+        schemas.TransactionTimeseriesPoint(
             date=str(day),
             total=total,
             approve_count=approve_ct,
@@ -107,3 +107,48 @@ def analytics_timeseries(
         )
         for day, total, approve_ct, vault_ct, honeypot_ct in rows
     ]
+
+
+@router.get("/transactions", response_model=schemas.TransactionListResponse)
+def list_transactions(
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
+    routing_decision: Optional[str] = Query(None, pattern="^(approve|vault|honeypot)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(15, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _current_user=_ROLE_DEP,
+):
+    start_dt, end_dt = _date_bounds(start_date, end_date)
+
+    base_query = (
+        db.query(models.Transaction, models.ModelPrediction)
+        .join(models.ModelPrediction, models.ModelPrediction.transaction_id == models.Transaction.id)
+        .filter(models.Transaction.timestamp >= start_dt, models.Transaction.timestamp < end_dt)
+    )
+    if routing_decision:
+        base_query = base_query.filter(models.ModelPrediction.routing_decision == routing_decision)
+
+    total = base_query.count()
+    rows = (
+        base_query.order_by(models.Transaction.timestamp.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+    items = [
+        schemas.TransactionListItem(
+            transaction_id=tx.id,
+            name_orig=tx.name_orig,
+            name_dest=tx.name_dest,
+            type=tx.type,
+            amount=tx.amount,
+            final_risk_score=pred.final_risk_score,
+            routing_decision=pred.routing_decision,
+            timestamp=tx.timestamp,
+            source=tx.source,
+        )
+        for tx, pred in rows
+    ]
+    return schemas.TransactionListResponse(items=items, total=total, page=page, page_size=page_size)
