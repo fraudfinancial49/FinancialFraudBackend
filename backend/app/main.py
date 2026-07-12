@@ -10,7 +10,6 @@ from app.core.config import settings
 from app.db.base import Base, engine
 from app.services.feature_pipeline import FeatureSchemaError
 from app.services.ml_service import ShapExplainerError, registry as ml_registry
-from app.services import graph_service as graph_svc_module
 from app.routers import auth, transactions, vault, honeypot, admin, ops, analytics
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
