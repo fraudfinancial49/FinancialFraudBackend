@@ -41,6 +41,8 @@ from typing import Dict, Optional
 import joblib
 import numpy as np
 import pandas as pd
+from huggingface_hub import hf_hub_download
+from huggingface_hub.utils import EntryNotFoundError
 
 from app.core.config import settings
 
@@ -60,23 +62,35 @@ class GraphService:
         self._metric_min: Dict[str, float] = {}
         self._metric_max: Dict[str, float] = {}
 
-        # Phase-4-only, in-memory live bookkeeping (never part of the frozen
-        # Phase 2 export). Maps account -> {"out_edges": {receiver: {"weight":.., "tx_count":..}}}
         self._live_edges: Dict[str, Dict[str, Dict[str, float]]] = {}
         self._lock = threading.Lock()
         self._edges_since_persist = 0
         self.loaded = False
 
-    # --- path helpers --------------------------------------------------------
-    def _phase2_path(self) -> str:
-        return os.path.join(settings.PHASE2_ARTIFACTS_DIR, settings.PHASE2_GRAPH_WEIGHT_MAPS_FILE)
+        # Same Hugging Face repo Phase 3's ml_service.py already pulls from --
+        # graph_weight_maps.joblib lives there too, at artifacts/phase2/.
+        self.repo_id = "ff49/financialfraudmodel"
+        self.token = os.getenv("HF_TOKEN")
 
     def _live_state_path(self) -> str:
         return os.path.join(settings.RUNTIME_STATE_DIR, settings.LIVE_GRAPH_STATE_FILE)
 
+    def _fetch_phase2_artifact(self) -> Optional[str]:
+        """Downloads/locates graph_weight_maps.joblib from HF Hub. Render's
+        filesystem is ephemeral -- there is no local Phase 2 artifact tree to
+        read from, so this replaces the old local-path lookup entirely."""
+        repo_filepath = os.path.join(
+            settings.PHASE2_ARTIFACTS_SUBDIR, settings.PHASE2_GRAPH_WEIGHT_MAPS_FILE
+        ).replace(os.sep, "/")
+        try:
+            return hf_hub_download(repo_id=self.repo_id, filename=repo_filepath, token=self.token)
+        except (EntryNotFoundError, Exception) as exc:
+            logger.warning("Could not fetch %s from HF Hub (%s).", repo_filepath, exc)
+            return None
+
     def load(self) -> None:
-        path = self._phase2_path()
-        if os.path.isfile(path):
+        path = self._fetch_phase2_artifact()
+        if path is not None:
             weight_maps = joblib.load(path)
             self.account_graph_metrics = weight_maps.get("account_graph_metrics")
             self.community_sizes = weight_maps.get("community_sizes", {})
@@ -86,19 +100,23 @@ class GraphService:
             self.risk_weights = weight_maps.get("risk_weights", {})
             n_accounts = len(self.account_graph_metrics) if self.account_graph_metrics is not None else 0
             logger.info(
-                "Loaded frozen Phase 2 graph_weight_maps.joblib: %d accounts, %d communities, "
+                "Loaded frozen Phase 2 graph_weight_maps.joblib from HF Hub: %d accounts, %d communities, "
                 "modularity=%.4f.", n_accounts, self.n_communities, self.modularity_score,
             )
             self._fit_metric_bounds()
         else:
             self.account_graph_metrics = pd.DataFrame(columns=GRAPH_METRIC_COLS + ["community_id"])
             logger.warning(
-                "No graph_weight_maps.joblib found at %s -- serving with an empty frozen graph "
-                "snapshot (every account will resolve as cold-start).", path,
+                "graph_weight_maps.joblib unavailable from HF Hub repo %s -- serving with an empty "
+                "frozen graph snapshot (every account will resolve as cold-start).", self.repo_id,
             )
 
         self._load_live_state()
         self.loaded = True
+
+    # ... _fit_metric_bounds, _load_live_state, persist, add_edge_incremental,
+    # _static_metrics_for, _community_size, _minmax, account_risk_snapshot
+    # all stay exactly as they are, unchanged.
 
     def _fit_metric_bounds(self) -> None:
         """Per-column min/max across the frozen account snapshot -- used to
