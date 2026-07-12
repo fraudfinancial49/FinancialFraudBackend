@@ -67,7 +67,7 @@ class Transaction(Base):
     step = Column(Integer, nullable=False, index=True)
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     created_by_user_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
-
+    source = Column(String(20), nullable=False, default="manual_sandbox", index=True)
     predictions = relationship("ModelPrediction", back_populates="transaction", uselist=False)
     vault_record = relationship("SafeVaultTransaction", back_populates="transaction", uselist=False)
 
