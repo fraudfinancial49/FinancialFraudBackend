@@ -31,7 +31,8 @@ app.include_router(transactions.router)
 app.include_router(vault.router)
 app.include_router(honeypot.router)
 app.include_router(admin.router)
-app.include_router(ops.router)
+# FIXED: Prefix attached to operations paths to meet frontend endpoint alignment requirements
+app.include_router(ops.router, prefix="/api/v1")
 app.include_router(analytics.router)
 
 
@@ -114,3 +115,4 @@ async def unhandled_error_handler(request: Request, exc: Exception):
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"status": "error", "message": "An internal error occurred."}
     )
+    
