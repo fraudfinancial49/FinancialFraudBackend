@@ -19,7 +19,6 @@ def _log_audit(db: Session, actor_id: str, action: str, target_id: str, details:
     db.commit()
 
 
-# --- NEW ENDPOINT ADDED FOR FRONTEND PERSISTENCE ---
 @router.get("/cases")
 def list_vault_cases(
     db: Session = Depends(get_db), 
@@ -28,7 +27,6 @@ def list_vault_cases(
     """Fetches all Safe Vault transactions ordered chronologically (newest first)."""
     records = db.query(models.SafeVaultTransaction).order_by(models.SafeVaultTransaction.created_at.desc()).all()
     
-    # Maps the SQLAlchemy output directly to the React frontend's expected interface
     return [
         {
             "vault_id": r.id,
@@ -54,14 +52,17 @@ def generate_or_verify_otp(
     if vault_record.status != "frozen":
         raise HTTPException(status_code=400, detail=f"Vault record is not frozen (status={vault_record.status}).")
 
-    if not vault_record.otp_code:
+    # FIX: Check if the frontend intentionally requested a new OTP by sending an empty string
+    if not payload.otp_code:
         code = f"{random.randint(0, 999999):06d}"
         vault_record.otp_code = code
         vault_record.otp_expires_at = datetime.utcnow() + timedelta(minutes=5)
+        vault_record.otp_attempts = 0  # Reset attempts for the new code
         db.add(vault_record)
         db.commit()
         return GenericStatus(status="otp_issued", message="OTP generated.", data={"otp_code": code})
 
+    # Verification Step
     vault_record.otp_attempts += 1
     if vault_record.otp_expires_at and datetime.utcnow() > vault_record.otp_expires_at:
         raise HTTPException(status_code=400, detail="OTP expired. Request a new one.")
