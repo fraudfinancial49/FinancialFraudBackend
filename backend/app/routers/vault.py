@@ -15,8 +15,30 @@ router = APIRouter(prefix="/vault", tags=["safe-vault"])
 
 def _log_audit(db: Session, actor_id: str, action: str, target_id: str, details: dict):
     db.add(models.AuditLog(actor_user_id=actor_id, action=action, target_type="safevault_transaction",
-                            target_id=target_id, details=details))
+                           target_id=target_id, details=details))
     db.commit()
+
+
+# --- NEW ENDPOINT ADDED FOR FRONTEND PERSISTENCE ---
+@router.get("/cases")
+def list_vault_cases(
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(get_current_user)
+):
+    """Fetches all Safe Vault transactions ordered chronologically (newest first)."""
+    records = db.query(models.SafeVaultTransaction).order_by(models.SafeVaultTransaction.created_at.desc()).all()
+    
+    # Maps the SQLAlchemy output directly to the React frontend's expected interface
+    return [
+        {
+            "vault_id": r.id,
+            "transaction_id": r.transaction_id,
+            "status": r.status,
+            "reason": r.admin_override_reason, 
+            "created_at": r.created_at.isoformat() if r.created_at else None
+        }
+        for r in records
+    ]
 
 
 @router.post("/otp", response_model=GenericStatus)
