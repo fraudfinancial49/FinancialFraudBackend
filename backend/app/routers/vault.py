@@ -10,7 +10,7 @@ from app.core.deps import get_current_user, require_admin
 from app.services import trust_service
 from app.schemas.schemas import VaultOTPVerifyRequest, VaultAdminReviewRequest, VaultMoveRequest, GenericStatus
 
-router = APIRouter(prefix="/vault", tags=["safe-vault"])
+router = APIRouter(prefix="/api/v1/vault", tags=["safe-vault"])
 
 
 def _log_audit(db: Session, actor_id: str, action: str, target_id: str, details: dict):
