@@ -71,3 +71,28 @@ def close_session(
     n_events = db.query(models.HoneypotEvent).filter(models.HoneypotEvent.session_id == session.id).count()
     return GenericStatus(status="closed", message="Honeypot session closed.",
                           data={"total_events": n_events})
+
+
+# Add this to the bottom of app/routers/honeypot.py
+
+@router.get("/sessions")
+def list_sessions(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """Fetches the 50 most recent honeypot sessions from the persistent database."""
+    sessions = db.query(models.HoneypotSession).order_by(models.HoneypotSession.started_at.desc()).limit(50).all()
+    
+    result = []
+    for s in sessions:
+        # Count how many events are attached to this session
+        events_count = db.query(models.HoneypotEvent).filter(models.HoneypotEvent.session_id == s.id).count()
+        result.append({
+            "session_id": str(s.id),
+            "transaction_id": str(s.transaction_id) if s.transaction_id else None,
+            "simulated_ip": s.simulated_ip,
+            "browser_fingerprint": s.browser_fingerprint,
+            "stage": s.stage,
+            "risk_score_at_entry": s.risk_score_at_entry,
+            "started_at": s.started_at.isoformat() if s.started_at else None,
+            "closed_at": s.closed_at.isoformat() if s.closed_at else None,
+            "events_count": events_count
+        })
+    return result
