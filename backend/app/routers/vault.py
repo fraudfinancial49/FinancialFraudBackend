@@ -29,8 +29,9 @@ def list_vault_cases(
     
     return [
         {
-            "vault_id": r.id,
-            "transaction_id": r.transaction_id,
+            # Explicit string casting ensures UUID objects serialize correctly to JSON
+            "vault_id": str(r.id) if r.id else "",
+            "transaction_id": str(r.transaction_id) if r.transaction_id else "",
             "status": r.status,
             "reason": r.admin_override_reason, 
             "created_at": r.created_at.isoformat() if r.created_at else None
@@ -47,12 +48,13 @@ def generate_or_verify_otp(
     vault_record = db.query(models.SafeVaultTransaction).filter(
         models.SafeVaultTransaction.id == payload.vault_id
     ).first()
+    
     if vault_record is None:
         raise HTTPException(status_code=404, detail="Vault record not found.")
     if vault_record.status != "frozen":
         raise HTTPException(status_code=400, detail=f"Vault record is not frozen (status={vault_record.status}).")
 
-    # FIX: Check if the frontend intentionally requested a new OTP by sending an empty string
+    # Check if the frontend intentionally requested a new OTP by sending an empty string
     if not payload.otp_code:
         code = f"{random.randint(0, 999999):06d}"
         vault_record.otp_code = code
@@ -88,6 +90,7 @@ def admin_review(
     vault_record = db.query(models.SafeVaultTransaction).filter(
         models.SafeVaultTransaction.id == payload.vault_id
     ).first()
+    
     if vault_record is None:
         raise HTTPException(status_code=404, detail="Vault record not found.")
 
@@ -102,8 +105,9 @@ def admin_review(
     tx = db.query(models.Transaction).filter(models.Transaction.id == vault_record.transaction_id).first()
     trust_score = 80.0 if payload.decision == "approve" else 10.0
     trust_service.record_confirmed_outcome(db, tx.name_orig, trust_score=trust_score, outcome_source="admin_override")
-    _log_audit(db, current_admin.id, f"vault_review_{payload.decision}", vault_record.id,
-               {"reason": payload.reason})
+    
+    _log_audit(db, current_admin.id, f"vault_review_{payload.decision}", vault_record.id, {"reason": payload.reason})
+    
     return GenericStatus(status="reviewed", message=f"Admin override applied: {payload.decision}.")
 
 
@@ -115,9 +119,11 @@ def move_to_vault(
     tx = db.query(models.Transaction).filter(models.Transaction.id == payload.transaction_id).first()
     if tx is None:
         raise HTTPException(status_code=404, detail="Transaction not found.")
+        
     existing = db.query(models.SafeVaultTransaction).filter(
         models.SafeVaultTransaction.transaction_id == tx.id
     ).first()
+    
     if existing:
         raise HTTPException(status_code=400, detail="Transaction is already in the Safe Vault.")
 
@@ -125,6 +131,8 @@ def move_to_vault(
     db.add(vault_record)
     db.commit()
     db.refresh(vault_record)
+    
     _log_audit(db, current_admin.id, "manual_escalation_to_vault", vault_record.id, {"reason": payload.reason})
+    
     return GenericStatus(status="moved_to_vault", message="Transaction manually escalated to Safe Vault.",
-                          data={"vault_id": vault_record.id})
+                          data={"vault_id": str(vault_record.id)})
