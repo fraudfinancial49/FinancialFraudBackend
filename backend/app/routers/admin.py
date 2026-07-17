@@ -133,3 +133,25 @@ def trigger_retrain(
         retrain_run_id=run.id,
         message=run_message,
     )
+
+
+# Add this to the bottom of app/routers/admin.py
+
+@router.get("/attacker-profiles")
+def list_attacker_profiles(db: Session = Depends(get_db), current_admin: models.User = Depends(require_admin)):
+    """Fetches all generated attacker profiles, sorted by highest threat score."""
+    profiles = db.query(models.AttackerProfile).order_by(models.AttackerProfile.threat_score.desc()).all()
+    
+    return [
+        {
+            "browser_fingerprint": p.browser_fingerprint,
+            "simulated_ip": p.simulated_ip,
+            "total_sessions": p.total_sessions,
+            "avg_session_duration_seconds": p.avg_session_duration_seconds,
+            "avg_events_per_session": p.avg_events_per_session,
+            "cluster_label": p.cluster_label,
+            "threat_score": p.threat_score,
+            "last_seen_at": p.last_seen_at.isoformat() if p.last_seen_at else None
+        }
+        for p in profiles
+    ]
