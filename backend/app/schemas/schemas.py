@@ -50,6 +50,7 @@ class TransactionAssessResponse(BaseModel):
     latency_ms: float
     honeypot_session_id: Optional[str] = None
     vault_id: Optional[str] = None
+    auto_reject_id: Optional[str] = None
 
 
 # --- Safe Vault ---
@@ -68,6 +69,15 @@ class VaultMoveRequest(BaseModel):
     transaction_id: str
     reason: str
 
+class AutoRejectedTransactionOut(BaseModel):
+    id: str
+    transaction_id: str
+    final_risk_score: float
+    reason: str
+    rejected_at: datetime
+
+    class Config:
+        from_attributes = True
 
 # --- Honeypot ---
 class HoneypotStartRequest(BaseModel):
