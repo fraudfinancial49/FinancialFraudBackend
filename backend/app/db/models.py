@@ -144,6 +144,19 @@ class HoneypotSession(Base):
 
     events = relationship("HoneypotEvent", back_populates="session")
 
+# ---------------------------------------------------------------------------
+# AUTO-REJECT AUDIT (immutable log of every automatic, no-human-in-the-loop
+# rejection triggered by tier 3 of the risk router)
+# ---------------------------------------------------------------------------
+class AutoRejectedTransaction(Base):
+    __tablename__ = "auto_rejected_transactions"
+
+    id = uuid_column(primary_key=True)
+    transaction_id = Column(String(36), ForeignKey("transactions.id"), nullable=False, index=True)
+
+    final_risk_score = Column(Float, nullable=False, index=True)
+    reason = Column(Text, nullable=False)  # human-readable summary of why the router killed it
+    rejected_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 class HoneypotEvent(Base):
     __tablename__ = "honeypot_events"
