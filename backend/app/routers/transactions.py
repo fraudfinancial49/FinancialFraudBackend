@@ -45,6 +45,25 @@ def assess_transaction(
     db.commit()
     db.refresh(tx)
 
+    # --- Part 2: automatic block-list enforcement (no admin step) ---
+    blocked = (
+        db.query(models.BlockedAccount)
+        .filter(models.BlockedAccount.account_id == tx.name_orig, models.BlockedAccount.is_active.is_(True))
+        .first()
+    )
+    if blocked is not None:
+        rejected = models.AutoRejectedTransaction(
+            transaction_id=tx.id, final_risk_score=100.0, reason="blocked_account",
+        )
+        db.add(rejected)
+        db.commit()
+        db.refresh(rejected)
+        return TransactionAssessResponse(
+            transaction_id=tx.id, final_risk_score=100.0, routing_decision="auto_reject",
+            message=f"Account {tx.name_orig} is blocked by an administrator.",
+            latency_ms=0.0, auto_reject_id=rejected.id,
+        )
+
     # 2) Reconstruct live features.
     raw_tx = feature_pipeline.RawTransaction(
         nameOrig=payload.nameOrig, nameDest=payload.nameDest, type=payload.type,
@@ -194,7 +213,7 @@ def explain_transaction(
     """
     Real-time, per-transaction Explainable AI: returns SHAP contributions for the
     positive (fraud) class, computed live against the frozen Phase 3 champion
-    tree model. Restricted to \'analyst\' and \'admin\' roles via JWT + RBAC.
+    tree model. Restricted to 'analyst' and 'admin' roles via JWT + RBAC.
     """
     t0 = time.time()
     registry = ml_service.registry
