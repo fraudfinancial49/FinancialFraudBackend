@@ -15,6 +15,7 @@ class UserOut(BaseModel):
     email: EmailStr
     role: str
     is_active: bool
+    wallet_balance: float = 0.0  # Added for customer website
 
     class Config:
         from_attributes = True
@@ -127,7 +128,7 @@ class AdminRetrainResponse(BaseModel):
     message: str
 
 
-# --- Analytics & transaction history (NEW) ---
+# --- Analytics & transaction history ---
 class TransactionAnalyticsSummary(BaseModel):
     start_date: str
     end_date: str
@@ -135,6 +136,7 @@ class TransactionAnalyticsSummary(BaseModel):
     total_volume: float
     approve_count: int
     vault_count: int
+    block_count: int          # New Block Tier
     honeypot_count: int
     flagged_count: int
     fraud_rate: float
@@ -147,6 +149,7 @@ class TransactionTimeseriesPoint(BaseModel):
     total: int
     approve_count: int
     vault_count: int
+    block_count: int          # New Block Tier
     honeypot_count: int
     flagged_count: int
 
@@ -168,3 +171,24 @@ class TransactionListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+# --- NEW: Admin Controls & Customer Portal ---
+class AccountStatusUpdate(BaseModel):
+    is_active: bool
+    reason: Optional[str] = None
+
+
+class AccountProfileResponse(BaseModel):
+    user_id: str
+    email: EmailStr
+    role: str
+    is_active: bool
+    wallet_balance: float
+    recent_transactions: List[TransactionListItem]
+
+
+class WalletBalanceResponse(BaseModel):
+    user_id: str
+    wallet_balance: float
+    last_updated: datetime
