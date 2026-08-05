@@ -202,3 +202,31 @@ class WalletBalanceResponse(BaseModel):
     user_id: str
     wallet_balance: float
     last_updated: datetime
+
+class AccountTransactionOut(BaseModel):
+    transaction_id: str
+    name_orig: str
+    name_dest: str
+    type: str
+    amount: float
+    routing_decision: Optional[str] = None
+    final_risk_score: Optional[float] = None
+    timestamp: str
+
+class AccountTransactionsResponse(BaseModel):
+    account_id: str
+    total: int
+    page: int
+    page_size: int
+    is_blocked: bool
+    transactions: List[AccountTransactionOut]
+
+class AccountBlockRequest(BaseModel):
+    reason: Optional[str] = None
+
+class AccountBlockStatusOut(BaseModel):
+    account_id: str
+    is_blocked: bool
+    reason: Optional[str] = None
+    blocked_by: Optional[str] = None
+    blocked_at: Optional[str] = None
