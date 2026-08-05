@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     # risk score bins) ---
     LOW_RISK_MAX: float = 30.0
     MODERATE_RISK_MAX: float = 60.0
+    HIGH_RISK_MAX: float = 85.0
 
     # --- CORS ---
     CORS_ORIGINS: List[str] = Field(default_factory=lambda: ["*"])
