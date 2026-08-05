@@ -111,11 +111,11 @@ def fuse(
     return float(min(max(fused_0_1 * 100.0, 0.0), 100.0))
 
 
-def route(final_risk_score: float, low_max: float, moderate_max: float, high_max: float) -> str:
+def route(final_risk_score: float, low_max: float, otp_max: float, reject_max: float) -> str:
     if final_risk_score < low_max:
         return "approve"
-    if final_risk_score < moderate_max:
-        return "vault"
-    if final_risk_score < high_max:
-        return "block"
+    if final_risk_score < otp_max:
+        return "otp_verification"
+    if final_risk_score < reject_max:
+        return "auto_reject"
     return "honeypot"
