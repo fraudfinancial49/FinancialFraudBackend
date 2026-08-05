@@ -11,7 +11,7 @@ from app.db import models
 from app.core.deps import require_admin
 from app.services import threat_intel, ml_service
 from app.schemas.schemas import (
-    FeedbackSubmitRequest, GenericStatus, AdminRetrainRequest, AdminRetrainResponse,
+    FeedbackSubmitRequest, GenericStatus, AdminRetrainRequest, AdminRetrainResponse, AccountTransactionOut, AccountTransactionsResponse, AccountBlockRequest, AccountBlockStatusOut,
 )
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
@@ -155,3 +155,117 @@ def list_attacker_profiles(db: Session = Depends(get_db), current_admin: models.
         }
         for p in profiles
     ]
+
+# ---------------------------------------------------------------------------
+# ACCOUNT LOOKUP + BLOCK (Part 2 — admin dashboard "view any account" feature)
+# ---------------------------------------------------------------------------
+
+def _account_block_row(db: Session, account_id: str):
+    return (
+        db.query(models.BlockedAccount)
+        .filter(models.BlockedAccount.account_id == account_id, models.BlockedAccount.is_active.is_(True))
+        .first()
+    )
+
+
+@router.get("/accounts/{account_id}/transactions", response_model=AccountTransactionsResponse)
+def get_account_transactions(
+    account_id: str,
+    page: int = 1,
+    page_size: int = 25,
+    db: Session = Depends(get_db),
+    current_admin: models.User = Depends(require_admin),
+):
+    """Every transaction where `account_id` was either the sender or the receiver."""
+    base_q = (
+        db.query(models.Transaction, models.ModelPrediction)
+        .outerjoin(models.ModelPrediction, models.ModelPrediction.transaction_id == models.Transaction.id)
+        .filter(or_(models.Transaction.name_orig == account_id, models.Transaction.name_dest == account_id))
+    )
+    total = base_q.count()
+    rows = (
+        base_q.order_by(models.Transaction.timestamp.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    blocked_row = _account_block_row(db, account_id)
+
+    return AccountTransactionsResponse(
+        account_id=account_id,
+        total=total,
+        page=page,
+        page_size=page_size,
+        is_blocked=blocked_row is not None,
+        transactions=[
+            AccountTransactionOut(
+                transaction_id=tx.id, name_orig=tx.name_orig, name_dest=tx.name_dest,
+                type=tx.type, amount=tx.amount,
+                routing_decision=pred.routing_decision if pred else None,
+                final_risk_score=pred.final_risk_score if pred else None,
+                timestamp=tx.timestamp.isoformat(),
+            )
+            for tx, pred in rows
+        ],
+    )
+
+
+@router.get("/accounts/{account_id}/status", response_model=AccountBlockStatusOut)
+def get_account_status(
+    account_id: str, db: Session = Depends(get_db),
+    current_admin: models.User = Depends(require_admin),
+):
+    row = _account_block_row(db, account_id)
+    if row is None:
+        return AccountBlockStatusOut(account_id=account_id, is_blocked=False)
+    blocker = db.query(models.User).filter(models.User.id == row.blocked_by_user_id).first()
+    return AccountBlockStatusOut(
+        account_id=account_id, is_blocked=True, reason=row.reason,
+        blocked_by=blocker.email if blocker else None,
+        blocked_at=row.blocked_at.isoformat(),
+    )
+
+
+@router.post("/accounts/{account_id}/block", response_model=AccountBlockStatusOut)
+def block_account(
+    account_id: str, payload: AccountBlockRequest = AccountBlockRequest(),
+    db: Session = Depends(get_db), current_admin: models.User = Depends(require_admin),
+):
+    existing = _account_block_row(db, account_id)
+    if existing is None:
+        existing = models.BlockedAccount(
+            account_id=account_id, is_active=True, reason=payload.reason,
+            blocked_by_user_id=current_admin.id,
+        )
+        db.add(existing)
+    else:
+        existing.reason = payload.reason or existing.reason
+
+    db.add(models.AuditLog(
+        actor_user_id=current_admin.id, action="account_block",
+        target_type="account", target_id=account_id,
+        details={"reason": payload.reason},
+    ))
+    db.commit()
+    return AccountBlockStatusOut(
+        account_id=account_id, is_blocked=True, reason=existing.reason,
+        blocked_by=current_admin.email, blocked_at=datetime.utcnow().isoformat(),
+    )
+
+
+@router.post("/accounts/{account_id}/unblock", response_model=AccountBlockStatusOut)
+def unblock_account(
+    account_id: str, db: Session = Depends(get_db),
+    current_admin: models.User = Depends(require_admin),
+):
+    existing = _account_block_row(db, account_id)
+    if existing is not None:
+        existing.is_active = False
+        existing.unblocked_by_user_id = current_admin.id
+        existing.unblocked_at = datetime.utcnow()
+        db.add(models.AuditLog(
+            actor_user_id=current_admin.id, action="account_unblock",
+            target_type="account", target_id=account_id, details={},
+        ))
+        db.commit()
+    return AccountBlockStatusOut(account_id=account_id, is_blocked=False)
