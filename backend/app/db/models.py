@@ -186,7 +186,19 @@ class AttackerProfile(Base):
     last_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
+# ---------------------------------------------------------------------------
+# BLOCKED ACCOUNTS (admin dashboard: account-level kill switch)
+# ---------------------------------------------------------------------------
+class BlockedAccount(Base):
+    __tablename__ = "blocked_accounts"
 
+    account_id = Column(String(64), primary_key=True)  # matches Transaction.name_orig / name_dest
+    is_active = Column(Boolean, default=True, nullable=False, index=True)
+    reason = Column(Text, nullable=True)
+    blocked_by_user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    blocked_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    unblocked_by_user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    unblocked_at = Column(DateTime, nullable=True)
 # ---------------------------------------------------------------------------
 # FEEDBACK / RETRAINING QUEUE (append-only, offline/async consumer only)
 # ---------------------------------------------------------------------------
