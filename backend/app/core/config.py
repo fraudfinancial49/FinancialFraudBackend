@@ -28,7 +28,7 @@ from pydantic import Field
 class Settings(BaseSettings):
     # --- App metadata ---
     APP_NAME: str = "PaySim Fraud Prevention API"
-    APP_VERSION: str = "4.0.0"
+    APP_VERSION: str = "4.1.0"
     ENV: str = Field(default="development")
 
     # --- Database ---
@@ -80,10 +80,16 @@ class Settings(BaseSettings):
     GRAPH_PERSIST_EVERY_N_EDGES: int = 25
 
     # --- Risk routing thresholds (percent, 0-100 scale, matches Phase 3's hybrid
-    # risk score bins) ---
+    # risk score bins).
+    #
+    #   score  <  LOW_RISK_MAX                          -> approve
+    #   LOW_RISK_MAX  <= score <  MODERATE_RISK_MAX      -> otp_verification (Safe Vault)
+    #   MODERATE_RISK_MAX <= score <  HIGH_RISK_MAX      -> auto_reject   (NEW - Part 1)
+    #   score >= HIGH_RISK_MAX                           -> honeypot
+    # ---
     LOW_RISK_MAX: float = 30.0
-    OTP_RISK_MAX: float = 55.0
-    AUTO_REJECT_MAX: float = 80.0
+    MODERATE_RISK_MAX: float = 60.0
+    HIGH_RISK_MAX: float = 80.0
 
     # --- CORS ---
     CORS_ORIGINS: List[str] = Field(default_factory=lambda: ["*"])
