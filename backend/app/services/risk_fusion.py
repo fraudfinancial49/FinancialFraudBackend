@@ -14,11 +14,6 @@ offline equivalent -- it is a Phase-4-only, request-time addition layered on
 top at a small, fixed supplemental weight, with every weight (Phase 3's frozen
 9 signals + this one) renormalized together so the final blend still sums to 1.0.
 """
-from typing import Dict
-
-from sqlalchemy.orm import Session
-
-from app.db import models
 import logging
 from typing import Dict
 
@@ -37,6 +32,11 @@ DEFAULT_FUSION_WEIGHTS = {
     "lightgbm": 0.15, "mlp": 0.10, "isolation_forest": 0.10,
     "trust_risk": 0.08, "behavioral_risk": 0.06, "graph_risk": 0.06,
 }
+
+# The 4 routing tiers, in ascending risk order. Kept as a module-level constant
+# so other services (admin dashboard, analytics) can import it instead of
+# re-typing the literal strings.
+ROUTING_TIERS = ("approve", "otp_verification", "auto_reject", "honeypot")
 
 
 def get_threat_score(db: Session, browser_fingerprint: str) -> float:
@@ -101,21 +101,30 @@ def fuse(
     scale = (1.0 - THREAT_SCORE_SUPPLEMENTAL_WEIGHT) / phase3_weight_sum
     fused_0_1 = sum(components[k] * weights.get(k, 0.0) * scale for k in components)
     fused_0_1 += (threat_score / 100.0) * THREAT_SCORE_SUPPLEMENTAL_WEIGHT
-    
-    # FIXED: Replaced external variable scopes with local parameters
+
     logger.info(
-        "calibrated_probabilities=%s trust_risk=%.4f behavioral_risk=%.4f graph_risk=%.4f threat_score=%.4f weights=%s", 
+        "calibrated_probabilities=%s trust_risk=%.4f behavioral_risk=%.4f graph_risk=%.4f threat_score=%.4f weights=%s",
         calibrated_probabilities, trust_risk, behavioral_risk, graph_risk, threat_score, weights
     )
-    
+
     return float(min(max(fused_0_1 * 100.0, 0.0), 100.0))
 
 
-def route(final_risk_score: float, low_max: float, otp_max: float, reject_max: float) -> str:
+def route(final_risk_score: float, low_max: float, moderate_max: float, high_max: float) -> str:
+    """4-tier router.
+
+        score  <  low_max                    -> "approve"
+        low_max      <= score <  moderate_max -> "otp_verification"   (Safe Vault / OTP step-up)
+        moderate_max <= score <  high_max      -> "auto_reject"        (fully automatic kill, no human)
+        score >= high_max                      -> "honeypot"           (deception layer)
+
+    `high_max` must be >= `moderate_max` >= `low_max`; the caller (transactions
+    router) always passes `settings.LOW_RISK_MAX / MODERATE_RISK_MAX / HIGH_RISK_MAX`.
+    """
     if final_risk_score < low_max:
         return "approve"
-    if final_risk_score < otp_max:
+    if final_risk_score < moderate_max:
         return "otp_verification"
-    if final_risk_score < reject_max:
+    if final_risk_score < high_max:
         return "auto_reject"
     return "honeypot"
