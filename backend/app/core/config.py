@@ -82,8 +82,8 @@ class Settings(BaseSettings):
     # --- Risk routing thresholds (percent, 0-100 scale, matches Phase 3's hybrid
     # risk score bins) ---
     LOW_RISK_MAX: float = 30.0
-    MODERATE_RISK_MAX: float = 60.0
-    HIGH_RISK_MAX: float = 85.0
+    OTP_RISK_MAX: float = 55.0
+    AUTO_REJECT_MAX: float = 80.0
 
     # --- CORS ---
     CORS_ORIGINS: List[str] = Field(default_factory=lambda: ["*"])
