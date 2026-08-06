@@ -271,3 +271,35 @@ class CustomerTransactionOut(BaseModel):
 
 class OTPVerifyRequest(BaseModel):
     otp: str
+
+# --- Honeypot decoy endpoints (Part 5 — full automation) ---
+class DecoyBalanceRequest(BaseModel):
+    account_id: str
+    browser_fingerprint: str = ""
+    simulated_ip: str = ""
+
+class DecoyBalanceResponse(BaseModel):
+    account_id: str
+    balance: float
+    updated_at: datetime
+
+class DecoyTransferRequest(BaseModel):
+    name_dest: str
+    amount: float
+    browser_fingerprint: str = ""
+    simulated_ip: str = ""
+
+class DecoyTransferResponse(BaseModel):
+    transaction_id: str
+    status: str
+    message: str
+    threat_score: float
+
+class DecoyOtpRequest(BaseModel):
+    otp: str
+    browser_fingerprint: str = ""
+    simulated_ip: str = ""
+
+class DecoyOtpResponse(BaseModel):
+    verified: bool
+    threat_score: float
