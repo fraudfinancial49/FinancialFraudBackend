@@ -9,7 +9,7 @@ from sqlalchemy import or_
 from app.db.base import get_db
 from app.db import models
 from app.core.deps import get_current_user
-from app.core.security import get_password_hash, verify_password, create_access_token
+from app.core.security import hash_password, verify_password, create_access_token
 from app.schemas.schemas import (
     CustomerRegisterRequest, CustomerLoginRequest, CustomerAuthResponse,
     BalanceOut, CustomerTransactionOut,
@@ -27,7 +27,7 @@ def register(payload: CustomerRegisterRequest, db: Session = Depends(get_db)):
     account_id = f"C{uuid.uuid4().hex[:15].upper()}"
 
     user = models.User(
-        email=payload.email, hashed_password=get_password_hash(payload.password), role="customer",
+        email=payload.email, hashed_password=hash_password(payload.password), role="customer",
     )
     db.add(user)
     db.commit()
@@ -42,7 +42,7 @@ def register(payload: CustomerRegisterRequest, db: Session = Depends(get_db)):
     db.add(balance)
     db.commit()
 
-    token = create_access_token(user)
+    token = create_access_token(subject=user.id, role=user.role)
     return CustomerAuthResponse(access_token=token, account_id=account_id, full_name=payload.full_name)
 
 
@@ -56,7 +56,7 @@ def login(payload: CustomerLoginRequest, db: Session = Depends(get_db)):
     if customer is None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a customer account.")
 
-    token = create_access_token(user)
+    token = create_access_token(subject=user.id, role=user.role)
     return CustomerAuthResponse(access_token=token, account_id=customer.account_id, full_name=customer.full_name)
 
 
