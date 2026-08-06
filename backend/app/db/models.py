@@ -199,6 +199,7 @@ class BlockedAccount(Base):
     blocked_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     unblocked_by_user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
     unblocked_at = Column(DateTime, nullable=True)
+
 # ---------------------------------------------------------------------------
 # FEEDBACK / RETRAINING QUEUE (append-only, offline/async consumer only)
 # ---------------------------------------------------------------------------
@@ -291,7 +292,7 @@ class RetrainRun(Base):
     started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     completed_at = Column(DateTime, nullable=True)
 
----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # CUSTOMER-FACING WEBSITE (Part 4): auth, balances, OTP
 # ---------------------------------------------------------------------------
 class Customer(Base):
