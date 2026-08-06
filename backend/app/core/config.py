@@ -91,6 +91,15 @@ class Settings(BaseSettings):
     MODERATE_RISK_MAX: float = 60.0
     HIGH_RISK_MAX: float = 80.0
 
+    # --- SMTP (OTP email delivery — Part 4) ---
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_EMAIL: str = "no-reply@paysim-fraud.local"
+    OTP_EXPIRE_MINUTES: int = 5
+    OTP_LENGTH: int = 6
+
     # --- CORS ---
     CORS_ORIGINS: List[str] = Field(default_factory=lambda: ["*"])
 
