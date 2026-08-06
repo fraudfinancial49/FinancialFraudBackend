@@ -100,6 +100,10 @@ class Settings(BaseSettings):
     OTP_EXPIRE_MINUTES: int = 5
     OTP_LENGTH: int = 6
 
+    # --- Honeypot full automation (Part 5) ---
+    HONEYPOT_AUTO_BLOCK_THREAT_SCORE: float = 70.0  # AttackerProfile.threat_score >= this -> auto BlockedAccount
+    HONEYPOT_THREAT_SCORE_INCREMENT: float = 15.0     # added to threat_score per decoy interaction
+
     # --- CORS ---
     CORS_ORIGINS: List[str] = Field(default_factory=lambda: ["*"])
 
