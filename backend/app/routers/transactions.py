@@ -15,6 +15,7 @@ from app.schemas.schemas import (
     TransactionListItem, TransactionListResponse,
 )
 from app.services import ml_service, feature_pipeline, graph_service as graph_svc_module
+from app.services import honeypot_service
 from app.services import behavioral_service, trust_service, risk_fusion
 from app.services.ml_service import ShapExplainerError
 from app.core.config import settings
@@ -205,6 +206,12 @@ def assess_transaction(
         db.commit()
         db.refresh(session)
         honeypot_session_id = session.id
+        # Part 5: score + (if warranted) auto-block from the very first interaction — no admin step.
+        honeypot_service.record_interaction(
+            db, session.id, stage="started", account_id=payload.nameOrig,
+            browser_fingerprint=payload.browser_fingerprint, simulated_ip=payload.simulated_ip,
+            detail="Honeypot triggered by risk router.",
+        )
         message = "Transaction completed successfully."  # simulated completion message shown to the attacker
 
     return TransactionAssessResponse(
