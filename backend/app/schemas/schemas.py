@@ -230,3 +230,44 @@ class AccountBlockStatusOut(BaseModel):
     reason: Optional[str] = None
     blocked_by: Optional[str] = None
     blocked_at: Optional[str] = None
+
+# --- Customer-facing website (Part 4) ---
+class CustomerRegisterRequest(BaseModel):
+    full_name: str
+    email: str
+    password: str
+    opening_balance: float = 0.0
+
+class CustomerLoginRequest(BaseModel):
+    email: str
+    password: str
+
+class CustomerAuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    account_id: str
+    full_name: str
+
+class BalanceOut(BaseModel):
+    account_id: str
+    amount: float
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class CustomerTransactionOut(BaseModel):
+    id: str
+    name_orig: str
+    name_dest: str
+    type: str
+    amount: float
+    routing_decision: Optional[str] = None
+    status: str
+    timestamp: datetime
+
+    class Config:
+        from_attributes = True
+
+class OTPVerifyRequest(BaseModel):
+    otp: str
