@@ -10,6 +10,7 @@ from app.db.base import get_db
 from app.db import models
 from app.core.deps import get_current_user, require_roles
 from app.schemas.schemas import (
+    OTPVerifyRequest,
     TransactionAssessRequest, TransactionAssessResponse, TransactionExplainResponse,
     TransactionListItem, TransactionListResponse,
 )
@@ -18,6 +19,7 @@ from app.services import behavioral_service, trust_service, risk_fusion
 from app.services.ml_service import ShapExplainerError
 from app.core.config import settings
 from app.routers.analytics import _date_bounds
+from app.services import otp_service, email_service, ledger_service
 
 logger = logging.getLogger("transactions_router")
 router = APIRouter(prefix="/api/v1/transactions", tags=["transactions"])
@@ -156,13 +158,21 @@ def assess_transaction(
     auto_reject_id = None
     message = "Transaction approved."
 
+    if routing_decision == "approve":
+        ledger_service.settle_transaction(db, payload.nameOrig, payload.nameDest, payload.amount)
+
     if routing_decision == "otp_verification":
         vault_record = models.SafeVaultTransaction(transaction_id=tx.id, status="frozen")
         db.add(vault_record)
         db.commit()
         db.refresh(vault_record)
         vault_id = vault_record.id
-        message = "Transaction frozen pending step-up verification (OTP)."
+
+        otp_code = otp_service.generate_and_store_otp(db, tx.id)
+        customer = db.query(models.Customer).filter(models.Customer.user_id == current_user.id).first()
+        if customer is not None:
+            email_service.send_otp_email(customer.email, otp_code, tx.id)
+        message = "Transaction frozen pending step-up verification (OTP). A code has been emailed to you."
 
     elif routing_decision == "auto_reject":
         reason = (
@@ -276,3 +286,40 @@ def explain_transaction(
     db.commit()
 
     return TransactionExplainResponse(**response_payload)
+
+
+@router.post("/{transaction_id}/verify-otp")
+def verify_otp_endpoint(
+    transaction_id: str,
+    payload: OTPVerifyRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Fully automated step-up verification — no admin involved at any point."""
+    vault_record = (
+        db.query(models.SafeVaultTransaction)
+        .filter(models.SafeVaultTransaction.transaction_id == transaction_id)
+        .first()
+    )
+    if vault_record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No vault record for this transaction.")
+    if vault_record.status != "frozen":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Transaction already {vault_record.status}.")
+
+    tx = db.query(models.Transaction).filter(models.Transaction.id == transaction_id).first()
+    is_valid, reason = otp_service.verify_otp(db, transaction_id, payload.otp)
+
+    if is_valid:
+        vault_record.status = "verified"
+        db.commit()
+        ledger_service.settle_transaction(db, tx.name_orig, tx.name_dest, tx.amount)
+        trust_service.record_confirmed_outcome(db, tx.name_orig, trust_score=70.0, outcome_source="otp_verified")
+        return {"status": "verified", "message": "OTP verified — transaction completed."}
+
+    if "expired" in reason.lower() or "locked" in reason.lower():
+        vault_record.status = "rejected"
+        db.commit()
+        trust_service.record_confirmed_outcome(db, tx.name_orig, trust_score=15.0, outcome_source="otp_failed")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=reason)
+
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=reason)
