@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.db.base import Base, engine
 from app.services.feature_pipeline import FeatureSchemaError
 from app.services.ml_service import ShapExplainerError, registry as ml_registry
-from app.routers import auth, transactions, vault, honeypot, admin, ops, analytics
+from app.routers import auth, transactions, vault, honeypot, admin, ops, analytics, customer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger("main")
@@ -28,6 +28,7 @@ app.add_middleware(
 # Attach Routers
 app.include_router(auth.router)
 app.include_router(transactions.router)
+app.include_router(customer.router)
 app.include_router(vault.router)
 app.include_router(honeypot.router)
 app.include_router(admin.router)
@@ -115,4 +116,3 @@ async def unhandled_error_handler(request: Request, exc: Exception):
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"status": "error", "message": "An internal error occurred."}
     )
-    
