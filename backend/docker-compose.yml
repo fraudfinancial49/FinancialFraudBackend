@@ -1,0 +1,28 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: paysim_user
+      POSTGRES_PASSWORD: CHANGE_ME
+      POSTGRES_DB: paysim_db
+    volumes:
+      - paysim_pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      DATABASE_URL: postgresql+psycopg2://paysim_user:CHANGE_ME@db:5432/paysim_db
+      SECRET_KEY: ${SECRET_KEY:-CHANGE_ME_super_secret_key_min_32_chars_long}
+      MODELS_DIR: /srv/phase3_outputs
+      GRAPH_DIR: /srv/phase2_outputs
+    ports:
+      - "8000:8000"
+
+volumes:
+  paysim_pgdata:
