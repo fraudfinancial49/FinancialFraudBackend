@@ -56,12 +56,39 @@ def _ensure_transactions_source_column():
     logger.info("'transactions.source' column added successfully.")
 
 
+def _ensure_actual_network_origin_columns():
+    """Lightweight, idempotent schema patch. `Base.metadata.create_all()` only
+    creates tables that don't exist yet -- it never ALTERs an existing table, so
+    an older deployed database that already had `attacker_profiles` /
+    `honeypot_sessions` before the "actual network origin" columns were added to
+    the ORM models is permanently missing them without this patch."""
+    inspector = inspect(engine)
+    patches = [
+        ("attacker_profiles", "actual_ip", "VARCHAR(64)"),
+        ("attacker_profiles", "location", "VARCHAR(128)"),
+        ("honeypot_sessions", "actual_ip", "VARCHAR(64)"),
+        ("honeypot_sessions", "location", "VARCHAR(128)"),
+    ]
+    for table, column, col_type in patches:
+        if table not in inspector.get_table_names():
+            continue  # table itself doesn't exist yet -- create_all() will create it with the column already present
+        existing_cols = {col["name"] for col in inspector.get_columns(table)}
+        if column in existing_cols:
+            continue
+        logger.info("Patching missing '%s.%s' column onto existing table...", table, column)
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+            conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table}_{column} ON {table} ({column})"))
+        logger.info("'%s.%s' column added successfully.", table, column)
+
+
 @app.on_event("startup")
 def on_startup():
     """Executes core framework initializations on boot."""
     logger.info("Syncing relational database schemas...")
     Base.metadata.create_all(bind=engine)
     _ensure_transactions_source_column()
+    _ensure_actual_network_origin_columns()
     
     logger.info("Loading metadata registry configurations from Hugging Face Hub...")
     # Flags the model registry as loaded so endpoints can begin processing requests
