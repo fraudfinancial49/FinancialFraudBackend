@@ -28,15 +28,21 @@ class Token(BaseModel):
 
 # --- Transaction assessment ---
 class TransactionAssessRequest(BaseModel):
-    nameOrig: str
+    # nameOrig and the balance/step fields are Optional at the schema level
+    # because a customer-initiated transfer never supplies them -- the router
+    # derives and overwrites them server-side for that path. For the admin/
+    # analyst Sandbox path they are still required; the router enforces that
+    # explicitly since Pydantic can't conditionally require a field based on
+    # the caller's role.
+    nameOrig: Optional[str] = None
     nameDest: str
     type: str = Field(pattern="^(CASH_IN|CASH_OUT|DEBIT|PAYMENT|TRANSFER)$")
     amount: float = Field(gt=0)
-    oldbalanceOrg: float = Field(ge=0)
-    newbalanceOrig: float = Field(ge=0)
-    oldbalanceDest: float = Field(ge=0)
-    newbalanceDest: float = Field(ge=0)
-    step: int = Field(ge=0)
+    oldbalanceOrg: Optional[float] = Field(default=None, ge=0)
+    newbalanceOrig: Optional[float] = Field(default=None, ge=0)
+    oldbalanceDest: Optional[float] = Field(default=None, ge=0)
+    newbalanceDest: Optional[float] = Field(default=None, ge=0)
+    step: Optional[int] = Field(default=None, ge=0)
     simulated_ip: Optional[str] = None
     user_agent: Optional[str] = None
     browser_fingerprint: Optional[str] = None

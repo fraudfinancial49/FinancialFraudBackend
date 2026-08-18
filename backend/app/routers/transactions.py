@@ -37,15 +37,50 @@ def assess_transaction(
     if not registry.loaded:
         raise HTTPException(status_code=503, detail="Model registry not loaded yet — try again shortly.")
 
-    # --- NEW: Validate Recipient for Customers Only ---
+    # --- Customer-initiated transfers: derive identity + balances server-side ---
+    # A real customer never supplies nameOrig / old-and-new balance fields --
+    # those are ML feature-engineering plumbing meant for the admin Sandbox's
+    # hand-built test transactions. For a customer, trusting client-submitted
+    # values here would also let an authenticated customer impersonate any
+    # account (nameOrig is what the ledger later debits/credits from), so we
+    # overwrite them unconditionally from the authenticated session + live
+    # Balance rows rather than merely defaulting when absent.
     if current_user.role == "customer":
-        recipient = db.query(models.Balance).filter(models.Balance.account_id == payload.nameDest).first()
-        if not recipient:
+        customer = db.query(models.Customer).filter(models.Customer.user_id == current_user.id).first()
+        if customer is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a customer account.")
+
+        recipient_balance = db.query(models.Balance).filter(models.Balance.account_id == payload.nameDest).first()
+        if not recipient_balance:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, 
-                detail="Recipient Account ID not found. Please check the ID and try again."
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Recipient Account ID not found. Please check the ID and try again.",
             )
-    # ------------------------------------------------
+        sender_balance = db.query(models.Balance).filter(models.Balance.account_id == customer.account_id).first()
+        if sender_balance is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No balance record found for your account.")
+        if payload.amount > sender_balance.amount:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Insufficient balance.")
+
+        payload.nameOrig = customer.account_id
+        payload.oldbalanceOrg = sender_balance.amount
+        payload.newbalanceOrig = sender_balance.amount - payload.amount
+        payload.oldbalanceDest = recipient_balance.amount
+        payload.newbalanceDest = recipient_balance.amount + payload.amount
+        payload.step = int(time.time() // 3600) % 744
+    else:
+        # Sandbox / admin-analyst path: these fields are hand-built test data
+        # and must be fully supplied, same strictness the schema used to enforce
+        # on its own before these fields became Optional to support customers.
+        missing = [
+            f for f in ("nameOrig", "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest", "step")
+            if getattr(payload, f) is None
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Missing required field(s): {', '.join(missing)}",
+            )
 
     # 1) Persist the raw transaction record.
     tx = models.Transaction(
