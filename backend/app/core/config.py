@@ -88,8 +88,8 @@ class Settings(BaseSettings):
     #   score >= HIGH_RISK_MAX                           -> honeypot
     # ---
     LOW_RISK_MAX: float = 30.0
-    MODERATE_RISK_MAX: float = 50.0
-    HIGH_RISK_MAX: float = 70.0
+    MODERATE_RISK_MAX: float = 60.0
+    HIGH_RISK_MAX: float = 80.0
 
     # --- Email delivery (OTP codes — Part 4) ---
     # Resend (https://resend.com) is the primary delivery path: an HTTP API,

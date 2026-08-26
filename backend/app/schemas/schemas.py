@@ -290,6 +290,12 @@ class BalanceOut(BaseModel):
         from_attributes = True
 
 
+class CustomerStatusOut(BaseModel):
+    # Deliberately reason-less -- a blocked customer should see that their
+    # account is blocked, never the internal admin justification for why.
+    is_blocked: bool
+
+
 class CustomerTransactionOut(BaseModel):
     id: str
     name_orig: str

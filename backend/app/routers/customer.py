@@ -12,7 +12,7 @@ from app.core.deps import get_current_user
 from app.core.security import hash_password, verify_password, create_access_token
 from app.schemas.schemas import (
     CustomerRegisterRequest, CustomerLoginRequest, CustomerAuthResponse,
-    BalanceOut, CustomerTransactionOut,
+    BalanceOut, CustomerTransactionOut, CustomerStatusOut,
 )
 
 logger = logging.getLogger("customer_router")
@@ -82,6 +82,22 @@ def get_my_balance(
     if balance is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No balance record found.")
     return balance
+
+
+@router.get("/me/status", response_model=CustomerStatusOut)
+def get_my_status(
+    response: Response,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    response.headers["Cache-Control"] = "no-store"
+    customer = _current_customer(db, current_user)
+    blocked = (
+        db.query(models.BlockedAccount)
+        .filter(models.BlockedAccount.account_id == customer.account_id, models.BlockedAccount.is_active.is_(True))
+        .first()
+    )
+    return CustomerStatusOut(is_blocked=blocked is not None)
 
 
 @router.get("/me/transactions", response_model=list[CustomerTransactionOut])
