@@ -266,7 +266,7 @@ class CustomerRegisterRequest(BaseModel):
     full_name: str
     email: EmailStr
     password: str
-    opening_balance: float = Field(default=2000.0)
+    opening_balance: float = Field(default=1000000.0)
 
 
 class CustomerLoginRequest(BaseModel):
