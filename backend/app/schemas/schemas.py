@@ -246,11 +246,11 @@ class AccountTransactionsResponse(BaseModel):
 
 
 class AccountBlockRequest(BaseModel):
-    reason: str = Field(..., min_length=3, description="Required justification, logged to the audit trail.")
+    reason: str = Field(..., min_length=1, description="Required justification, logged to the audit trail.")
 
 
 class AccountUnblockRequest(BaseModel):
-    reason: str = Field(..., min_length=3, description="Required justification, logged to the audit trail.")
+    reason: str = Field(..., min_length=1, description="Required justification, logged to the audit trail.")
 
 
 class AccountBlockStatusOut(BaseModel):

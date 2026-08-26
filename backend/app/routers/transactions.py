@@ -263,11 +263,18 @@ def assess_transaction(
     elif routing_decision == "honeypot":
         actual_ip = honeypot_service.extract_client_ip(request)
         location = honeypot_service.get_geo_location(actual_ip)
+        # Resolve once and store the SAME value on both the session and (via
+        # record_interaction below) the AttackerProfile it rolls up into --
+        # otherwise a null/blank fingerprint here diverges from the "unknown"
+        # fallback record_interaction applies when grouping profiles, and the
+        # admin timeline lookup (an exact string match) can never find this
+        # session again.
+        resolved_fingerprint = payload.browser_fingerprint or "unknown"
 
         session = models.HoneypotSession(
             transaction_id=tx.id, simulated_ip=payload.simulated_ip,
             actual_ip=actual_ip, location=location,
-            user_agent=payload.user_agent, browser_fingerprint=payload.browser_fingerprint,
+            user_agent=payload.user_agent, browser_fingerprint=resolved_fingerprint,
             stage="started", risk_score_at_entry=final_risk_score,
         )
         db.add(session)
@@ -277,7 +284,7 @@ def assess_transaction(
         # Part 5: score + (if warranted) auto-block from the very first interaction — no admin step.
         honeypot_service.record_interaction(
             db, session.id, stage="started", account_id=payload.nameOrig,
-            browser_fingerprint=payload.browser_fingerprint, simulated_ip=payload.simulated_ip,
+            browser_fingerprint=resolved_fingerprint, simulated_ip=payload.simulated_ip,
             detail="Honeypot triggered by risk router.",
         )
         message = "Transaction completed successfully."  # simulated completion message shown to the attacker

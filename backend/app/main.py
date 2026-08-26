@@ -85,6 +85,25 @@ def _ensure_incrementally_added_columns():
         logger.info("'%s.%s' column added successfully.", table, column)
 
 
+def _ensure_honeypot_fingerprint_backfill():
+    """One-time, idempotent data repair. Sessions created before honeypot_service's
+    "unknown" fallback was applied consistently were left with a NULL/blank
+    browser_fingerprint, while the AttackerProfile they roll up into was already
+    keyed by the string "unknown" -- an exact-match timeline lookup for that
+    profile could never find them. Runs on every boot but only ever touches rows
+    once; a no-op once every row has a non-empty fingerprint."""
+    inspector = inspect(engine)
+    if "honeypot_sessions" not in inspector.get_table_names():
+        return
+    with engine.begin() as conn:
+        result = conn.execute(text(
+            "UPDATE honeypot_sessions SET browser_fingerprint = 'unknown' "
+            "WHERE browser_fingerprint IS NULL OR browser_fingerprint = ''"
+        ))
+        if result.rowcount:
+            logger.info("Backfilled browser_fingerprint on %d honeypot session(s).", result.rowcount)
+
+
 @app.on_event("startup")
 def on_startup():
     """Executes core framework initializations on boot."""
@@ -92,7 +111,8 @@ def on_startup():
     Base.metadata.create_all(bind=engine)
     _ensure_transactions_source_column()
     _ensure_incrementally_added_columns()
-    
+    _ensure_honeypot_fingerprint_backfill()
+
     logger.info("Loading metadata registry configurations from Hugging Face Hub...")
     # Flags the model registry as loaded so endpoints can begin processing requests
     ml_registry.load()
