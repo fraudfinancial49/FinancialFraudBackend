@@ -191,6 +191,16 @@ def _account_block_row(db: Session, account_id: str):
     )
 
 
+def _any_block_row(db: Session, account_id: str):
+    """Unlike `_account_block_row`, ignores `is_active` -- `account_id` is the
+    table's primary key, so at most one row can ever exist per account across
+    its whole block/unblock history. Blocking must look this up (not the
+    active-only variant) before deciding insert vs. update, otherwise
+    re-blocking a previously-unblocked account tries to INSERT a second row
+    with the same primary key and crashes with an IntegrityError."""
+    return db.query(models.BlockedAccount).filter(models.BlockedAccount.account_id == account_id).first()
+
+
 _VAULT_STATUS_TO_TX_STATUS = {
     "frozen": "pending_otp",
     "otp_verified": "otp_verified",
@@ -297,7 +307,7 @@ def block_account(
     account_id: str, payload: AccountBlockRequest,
     db: Session = Depends(get_db), current_admin: models.User = Depends(require_admin),
 ):
-    existing = _account_block_row(db, account_id)
+    existing = _any_block_row(db, account_id)
     if existing is None:
         existing = models.BlockedAccount(
             account_id=account_id, is_active=True, reason=payload.reason,
@@ -305,7 +315,15 @@ def block_account(
         )
         db.add(existing)
     else:
-        existing.reason = payload.reason or existing.reason
+        # Re-blocking an account that was previously blocked and unblocked --
+        # reactivate the same row (its PK already exists) instead of inserting
+        # a second one.
+        existing.is_active = True
+        existing.reason = payload.reason
+        existing.blocked_by_user_id = current_admin.id
+        existing.blocked_at = datetime.utcnow()
+        existing.unblocked_by_user_id = None
+        existing.unblocked_at = None
 
     db.add(models.AuditLog(
         actor_user_id=current_admin.id, action="account_block",

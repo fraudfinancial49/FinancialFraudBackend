@@ -62,17 +62,26 @@ def _ensure_incrementally_added_columns():
     an older deployed database that already had these tables before a given
     column was added to the ORM model is permanently missing it without this
     patch. Add a (table, column, sql_type) tuple here whenever a new column is
-    added to an existing model."""
+    added to an existing model. 4th element (default True) controls whether an
+    index is also created -- must be False for JSON columns, since Postgres'
+    default btree access method doesn't support the native `json` type."""
     inspector = inspect(engine)
     patches = [
-        ("attacker_profiles", "actual_ip", "VARCHAR(64)"),
-        ("attacker_profiles", "location", "VARCHAR(128)"),
-        ("honeypot_sessions", "actual_ip", "VARCHAR(64)"),
-        ("honeypot_sessions", "location", "VARCHAR(128)"),
-        ("behavioral_profiles", "confirmed_fraud_count", "INTEGER NOT NULL DEFAULT 0"),
-        ("behavioral_profiles", "confirmed_legitimate_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("attacker_profiles", "actual_ip", "VARCHAR(64)", True),
+        ("attacker_profiles", "location", "VARCHAR(128)", True),
+        ("honeypot_sessions", "actual_ip", "VARCHAR(64)", True),
+        ("honeypot_sessions", "location", "VARCHAR(128)", True),
+        ("behavioral_profiles", "confirmed_fraud_count", "INTEGER NOT NULL DEFAULT 0", True),
+        ("behavioral_profiles", "confirmed_legitimate_count", "INTEGER NOT NULL DEFAULT 0", True),
+        # honeypot_events -- table predates these columns being added to the model.
+        ("honeypot_events", "event_type", "VARCHAR(40)", True),
+        ("honeypot_events", "sequence_index", "INTEGER", False),
+        ("honeypot_events", "headers", "JSON", False),
+        ("honeypot_events", "payload", "JSON", False),
+        ("honeypot_events", "stage", "VARCHAR(40)", True),
+        ("honeypot_events", "detail", "TEXT", False),
     ]
-    for table, column, col_type in patches:
+    for table, column, col_type, should_index in patches:
         if table not in inspector.get_table_names():
             continue  # table itself doesn't exist yet -- create_all() will create it with the column already present
         existing_cols = {col["name"] for col in inspector.get_columns(table)}
@@ -81,7 +90,8 @@ def _ensure_incrementally_added_columns():
         logger.info("Patching missing '%s.%s' column onto existing table...", table, column)
         with engine.begin() as conn:
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
-            conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table}_{column} ON {table} ({column})"))
+            if should_index:
+                conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table}_{column} ON {table} ({column})"))
         logger.info("'%s.%s' column added successfully.", table, column)
 
 
