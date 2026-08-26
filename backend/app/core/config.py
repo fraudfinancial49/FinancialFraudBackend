@@ -112,7 +112,7 @@ class Settings(BaseSettings):
 
     # --- AI-powered XAI narrative (Hugging Face free Inference Providers API,
     # reuses the HF_TOKEN env var already used elsewhere for model artifacts) ---
-    XAI_LLM_MODEL: str = "mistralai/Mistral-7B-Instruct-v0.2"
+    XAI_LLM_MODEL: str = "Qwen/Qwen3-4B-Instruct-2507"
 
     # --- Honeypot full automation (Part 5) ---
     HONEYPOT_AUTO_BLOCK_THREAT_SCORE: float = 70.0  # AttackerProfile.threat_score >= this -> auto BlockedAccount

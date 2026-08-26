@@ -16,14 +16,17 @@ logger = logging.getLogger("xai_narrative_service")
 # drifts over time and can't be verified from this codebase -- rather than
 # hardcode one guess that silently breaks again, try `settings.XAI_LLM_MODEL`
 # first (so it stays operator-configurable) then fall through this list of
-# other small, ungated, widely-mirrored instruct models on "auto" routing
-# (tries every provider the account has access to, not just one pinned
-# provider) until one actually answers.
+# other instruct models on "auto" routing (tries every provider the account
+# has access to) until one actually answers. This specific list was confirmed
+# present in the account's own huggingface.co/settings/inference-providers
+# model breakdown -- ungated ones first, since the one gated entry
+# (Llama-3.1-8B) can additionally fail if the account hasn't clicked through
+# Meta's license on its model page, independent of provider availability.
 _FALLBACK_MODELS = [
-    "Qwen/Qwen2.5-7B-Instruct",
-    "HuggingFaceH4/zephyr-7b-beta",
-    "microsoft/Phi-3-mini-4k-instruct",
-    "mistralai/Mistral-7B-Instruct-v0.2",
+    "google/gemma-3-4b-it",
+    "ibm-granite/granite-4.2-3b",
+    "ibm-granite/granite-4.2-8b",
+    "meta-llama/Llama-3.1-8B-Instruct",
 ]
 
 _SYSTEM_PROMPT = (
