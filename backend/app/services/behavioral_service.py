@@ -40,16 +40,26 @@ def snapshot(db: Session, account_id: str) -> Dict[str, float]:
         models.BehavioralProfile.account_id == account_id
     ).first()
     if profile is None or profile.transaction_count == 0:
+        # A profile can still carry confirmed feedback (fraud/legitimate) even
+        # with zero Welford transaction history -- e.g. an admin confirming an
+        # outcome before this account has any other recorded activity. That
+        # signal must survive this early-return branch, not get zeroed out.
+        confirmed_fraud = profile.confirmed_fraud_count if profile else 0
+        confirmed_legit = profile.confirmed_legitimate_count if profile else 0
+        confirmed_total = (confirmed_fraud or 0) + (confirmed_legit or 0)
+        fraud_ratio = (confirmed_fraud or 0) / confirmed_total if confirmed_total > 0 else 0.0
         return {
             "sender_transaction_count": 0.0, "sender_unique_receivers": 0.0,
             "sender_account_age_hours": 0.0, "sender_average_amount": 0.0,
             "sender_median_amount": 0.0, "sender_amount_std": 0.0,
             "sender_max_amount": 0.0, "sender_min_amount": 0.0,
-            "sender_running_total_amount": 0.0, "sender_historical_fraud_ratio": 0.0,
+            "sender_running_total_amount": 0.0, "sender_historical_fraud_ratio": float(fraud_ratio),
             "transaction_regularity_score": 0.0, "velocity_ratio": 0.0,
             "receiver_novelty_score": 0.0,
         }
     variance = profile.amount_m2 / profile.transaction_count if profile.transaction_count > 1 else 0.0
+    confirmed_total = (profile.confirmed_fraud_count or 0) + (profile.confirmed_legitimate_count or 0)
+    fraud_ratio = (profile.confirmed_fraud_count or 0) / confirmed_total if confirmed_total > 0 else 0.0
     return {
         "sender_transaction_count": float(profile.transaction_count),
         "sender_unique_receivers": float(profile.unique_receivers),
@@ -62,7 +72,9 @@ def snapshot(db: Session, account_id: str) -> Dict[str, float]:
         "sender_max_amount": float(profile.last_amount),
         "sender_min_amount": float(profile.last_amount),
         "sender_running_total_amount": float(profile.amount_mean * profile.transaction_count),
-        "sender_historical_fraud_ratio": 0.0,  # only updated via confirmed feedback, never raw model output
+        # Real-time feedback loop: updated immediately by record_feedback_outcome()
+        # whenever an admin confirms fraud/legitimate -- never from raw model output.
+        "sender_historical_fraud_ratio": float(fraud_ratio),
         "transaction_regularity_score": 0.5,
         "velocity_ratio": 1.0,
         "receiver_novelty_score": 0.0 if profile.unique_receivers > 0 else 1.0,
@@ -84,3 +96,20 @@ def update_profile(db: Session, account_id: str, amount: float, receiver_id: str
     profile.updated_at = datetime.utcnow()
     db.add(profile)
     db.commit()
+
+
+def record_feedback_outcome(db: Session, account_id: str, is_fraud: bool) -> models.BehavioralProfile:
+    """Real-time feedback loop: called immediately when an admin confirms a
+    transaction's outcome (POST /admin/feedback), NOT deferred to a batch job.
+    Updates the sending account's confirmed fraud/legitimate counters, which
+    directly feed `sender_historical_fraud_ratio` -- so every future transaction
+    from this account is scored with this outcome already baked in."""
+    profile = get_or_create_profile(db, account_id)
+    if is_fraud:
+        profile.confirmed_fraud_count = (profile.confirmed_fraud_count or 0) + 1
+    else:
+        profile.confirmed_legitimate_count = (profile.confirmed_legitimate_count or 0) + 1
+    db.add(profile)
+    db.commit()
+    db.refresh(profile)
+    return profile

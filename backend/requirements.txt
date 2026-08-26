@@ -21,3 +21,4 @@ gdown
 python-multipart
 pydantic[email]
 requests
+resend

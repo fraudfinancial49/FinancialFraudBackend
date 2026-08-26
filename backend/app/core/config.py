@@ -91,7 +91,17 @@ class Settings(BaseSettings):
     MODERATE_RISK_MAX: float = 60.0
     HIGH_RISK_MAX: float = 80.0
 
-    # --- SMTP (OTP email delivery — Part 4) ---
+    # --- Email delivery (OTP codes — Part 4) ---
+    # Resend (https://resend.com) is the primary delivery path: an HTTP API,
+    # so it works reliably from PaaS hosts (e.g. Render) that often block or
+    # throttle raw outbound SMTP. SMTP is kept as a fallback for local/dev use
+    # or if RESEND_API_KEY isn't set. RESEND_FROM_EMAIL defaults to Resend's
+    # shared sandbox sender, which only delivers to the account owner's own
+    # verified email -- swap it for an address on a domain you've verified
+    # with Resend before relying on this to reach real customers.
+    RESEND_API_KEY: str = ""
+    RESEND_FROM_EMAIL: str = "onboarding@resend.dev"
+
     SMTP_HOST: str = "smtp.gmail.com"
     SMTP_PORT: int = 587
     SMTP_USERNAME: str = ""
@@ -99,6 +109,10 @@ class Settings(BaseSettings):
     SMTP_FROM_EMAIL: str = "no-reply@paysim-fraud.local"
     OTP_EXPIRE_MINUTES: int = 5
     OTP_LENGTH: int = 6
+
+    # --- AI-powered XAI narrative (Hugging Face free Inference Providers API,
+    # reuses the HF_TOKEN env var already used elsewhere for model artifacts) ---
+    XAI_LLM_MODEL: str = "meta-llama/Llama-3.2-3B-Instruct"
 
     # --- Honeypot full automation (Part 5) ---
     HONEYPOT_AUTO_BLOCK_THREAT_SCORE: float = 70.0  # AttackerProfile.threat_score >= this -> auto BlockedAccount

@@ -56,18 +56,21 @@ def _ensure_transactions_source_column():
     logger.info("'transactions.source' column added successfully.")
 
 
-def _ensure_actual_network_origin_columns():
+def _ensure_incrementally_added_columns():
     """Lightweight, idempotent schema patch. `Base.metadata.create_all()` only
     creates tables that don't exist yet -- it never ALTERs an existing table, so
-    an older deployed database that already had `attacker_profiles` /
-    `honeypot_sessions` before the "actual network origin" columns were added to
-    the ORM models is permanently missing them without this patch."""
+    an older deployed database that already had these tables before a given
+    column was added to the ORM model is permanently missing it without this
+    patch. Add a (table, column, sql_type) tuple here whenever a new column is
+    added to an existing model."""
     inspector = inspect(engine)
     patches = [
         ("attacker_profiles", "actual_ip", "VARCHAR(64)"),
         ("attacker_profiles", "location", "VARCHAR(128)"),
         ("honeypot_sessions", "actual_ip", "VARCHAR(64)"),
         ("honeypot_sessions", "location", "VARCHAR(128)"),
+        ("behavioral_profiles", "confirmed_fraud_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("behavioral_profiles", "confirmed_legitimate_count", "INTEGER NOT NULL DEFAULT 0"),
     ]
     for table, column, col_type in patches:
         if table not in inspector.get_table_names():
@@ -88,7 +91,7 @@ def on_startup():
     logger.info("Syncing relational database schemas...")
     Base.metadata.create_all(bind=engine)
     _ensure_transactions_source_column()
-    _ensure_actual_network_origin_columns()
+    _ensure_incrementally_added_columns()
     
     logger.info("Loading metadata registry configurations from Hugging Face Hub...")
     # Flags the model registry as loaded so endpoints can begin processing requests

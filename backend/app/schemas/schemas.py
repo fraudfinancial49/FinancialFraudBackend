@@ -62,23 +62,6 @@ class TransactionAssessResponse(BaseModel):
     fusion_weights: Optional[Dict[str, float]] = None
 
 
-# --- Safe Vault ---
-class VaultOTPVerifyRequest(BaseModel):
-    vault_id: str
-    otp_code: str
-
-
-class VaultAdminReviewRequest(BaseModel):
-    vault_id: str
-    decision: str = Field(pattern="^(approve|reject)$")
-    reason: Optional[str] = None
-
-
-class VaultMoveRequest(BaseModel):
-    transaction_id: str
-    reason: str
-
-
 class AutoRejectedTransactionOut(BaseModel):
     id: str
     transaction_id: str
@@ -138,6 +121,19 @@ class TransactionExplainResponse(BaseModel):
     contributions: Dict[str, float]
     latency_ms: float
     cached: bool = False
+
+
+# --- AI-powered XAI narrative (Hugging Face free Inference API) ---
+class XAINarrativeRequest(BaseModel):
+    final_risk_score: float
+    routing_decision: str
+    contributions: Dict[str, float]
+
+
+class XAINarrativeResponse(BaseModel):
+    transaction_id: str
+    narrative: str
+    model_used: str
 
 
 # --- Admin retrain trigger ---
@@ -233,6 +229,11 @@ class AccountTransactionOut(BaseModel):
     routing_decision: Optional[str] = None
     final_risk_score: Optional[float] = None
     timestamp: str
+    # Fine-grained lifecycle status -- distinct from routing_decision, which
+    # only says which tier the router picked. This reflects what actually
+    # HAPPENED to the transaction afterward (e.g. an "otp_verification"-routed
+    # transaction can end up pending_otp / otp_verified / released / cancelled).
+    status: str
 
 
 class AccountTransactionsResponse(BaseModel):

@@ -266,6 +266,11 @@ class BehavioralProfile(Base):
     amount_m2 = Column(Float, default=0.0, nullable=False)  # Welford's running sum of squared diffs
     unique_receivers = Column(Integer, default=0, nullable=False)
     last_amount = Column(Float, default=0.0, nullable=False)
+    # Populated in realtime by the admin feedback loop (POST /admin/feedback) --
+    # never by raw model output. Drives `sender_historical_fraud_ratio`, one of
+    # the live-scored features every future transaction from this account sees.
+    confirmed_fraud_count = Column(Integer, default=0, nullable=False)
+    confirmed_legitimate_count = Column(Integer, default=0, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 

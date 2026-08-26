@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 from app.db.base import get_db
 from app.db import models
 from app.core.deps import require_admin
-from app.services import threat_intel, ml_service
+from app.services import threat_intel, ml_service, trust_service, behavioral_service
+from app.services.graph_service import graph_service
 from app.schemas.schemas import (
     FeedbackSubmitRequest, GenericStatus, AdminRetrainRequest, AdminRetrainResponse, AccountTransactionOut,
     AccountTransactionsResponse, AccountBlockRequest, AccountUnblockRequest, AccountBlockStatusOut,
@@ -40,14 +41,34 @@ def submit_feedback(
     payload: FeedbackSubmitRequest, db: Session = Depends(get_db),
     current_admin: models.User = Depends(require_admin),
 ):
-    """Append-only feedback log for OFFLINE, asynchronous retraining."""
+    """Real-time feedback loop: the confirmed outcome is applied to the sending
+    account's live trust score, behavioral fraud-ratio, and (for fraud) the
+    sender->receiver graph edge IMMEDIATELY -- every one of those signals feeds
+    directly into how the NEXT transaction from this account gets scored. The
+    FeedbackQueue row is still kept as an append-only audit trail and is what
+    /admin/retrain later consumes for its champion-vs-challenger cycle, but
+    nothing about the live scoring pipeline waits on that batch job anymore."""
     entry = models.FeedbackQueue(
         transaction_id=payload.transaction_id, submitted_by_user_id=current_admin.id,
         confirmed_outcome=payload.confirmed_outcome, notes=payload.notes,
     )
     db.add(entry)
     db.commit()
-    return GenericStatus(status="queued", message="Feedback appended to the offline retraining queue.")
+
+    tx = db.query(models.Transaction).filter(models.Transaction.id == payload.transaction_id).first()
+    if tx is not None and payload.confirmed_outcome in ("fraud", "legitimate"):
+        is_fraud = payload.confirmed_outcome == "fraud"
+        trust_service.record_confirmed_outcome(
+            db, tx.name_orig, trust_score=10.0 if is_fraud else 85.0, outcome_source="manual_review",
+        )
+        behavioral_service.record_feedback_outcome(db, tx.name_orig, is_fraud=is_fraud)
+        if is_fraud:
+            graph_service.record_confirmed_fraud_edge(tx.name_orig, tx.name_dest)
+
+    return GenericStatus(
+        status="queued",
+        message="Feedback recorded — behavioral profile and graph metrics updated in real time.",
+    )
 
 
 @router.post("/retrain", response_model=AdminRetrainResponse)
@@ -170,6 +191,48 @@ def _account_block_row(db: Session, account_id: str):
     )
 
 
+_VAULT_STATUS_TO_TX_STATUS = {
+    "frozen": "pending_otp",
+    "otp_verified": "otp_verified",
+    "released": "released",
+    "rejected": "cancelled",
+}
+
+
+def _derive_transaction_status(db: Session, tx: models.Transaction, pred) -> str:
+    """Fine-grained lifecycle status for a transaction, beyond just its routing
+    tier -- distinguishes e.g. an OTP still awaited from one already verified,
+    an admin-released case from a cancelled one, and a pre-scoring blocklist
+    rejection (no ModelPrediction row at all) from a real model-driven one."""
+    if pred is None:
+        blocked_reject = (
+            db.query(models.AutoRejectedTransaction)
+            .filter(
+                models.AutoRejectedTransaction.transaction_id == tx.id,
+                models.AutoRejectedTransaction.reason == "blocked_account",
+            )
+            .first()
+        )
+        return "blocked" if blocked_reject else "pending"
+
+    if pred.routing_decision == "approve":
+        return "approved"
+    if pred.routing_decision == "auto_reject":
+        return "auto_rejected"
+    if pred.routing_decision == "honeypot":
+        return "flagged_honeypot"
+    if pred.routing_decision == "otp_verification":
+        vault = (
+            db.query(models.SafeVaultTransaction)
+            .filter(models.SafeVaultTransaction.transaction_id == tx.id)
+            .first()
+        )
+        if vault is None:
+            return "pending_otp"
+        return _VAULT_STATUS_TO_TX_STATUS.get(vault.status, vault.status)
+    return pred.routing_decision or "pending"
+
+
 @router.get("/accounts/{account_id}/transactions", response_model=AccountTransactionsResponse)
 def get_account_transactions(
     account_id: str,
@@ -206,6 +269,7 @@ def get_account_transactions(
                 routing_decision=pred.routing_decision if pred else None,
                 final_risk_score=pred.final_risk_score if pred else None,
                 timestamp=tx.timestamp.isoformat(),
+                status=_derive_transaction_status(db, tx, pred),
             )
             for tx, pred in rows
         ],

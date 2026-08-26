@@ -132,12 +132,32 @@ class GraphService:
     def add_edge_incremental(self, sender: str, receiver: str, amount: float) -> None:
         with self._lock:
             bucket = self._live_edges.setdefault(sender, {})
-            edge = bucket.setdefault(receiver, {"weight": 0.0, "tx_count": 0})
+            edge = bucket.setdefault(receiver, {"weight": 0.0, "tx_count": 0, "confirmed_fraud_count": 0})
             edge["weight"] += amount
             edge["tx_count"] += 1
             self._edges_since_persist += 1
             if self._edges_since_persist >= settings.GRAPH_PERSIST_EVERY_N_EDGES:
                 self.persist()
+
+    def record_confirmed_fraud_edge(self, sender: str, receiver: str) -> None:
+        """Real-time feedback loop: called immediately when an admin confirms a
+        transaction as fraud, NOT deferred to a batch job. Marks this specific
+        sender->receiver edge as fraud-confirmed so `account_risk_snapshot` boosts
+        graph_risk for that pair on every future transaction between them."""
+        with self._lock:
+            bucket = self._live_edges.setdefault(sender, {})
+            edge = bucket.setdefault(receiver, {"weight": 0.0, "tx_count": 0, "confirmed_fraud_count": 0})
+            edge["confirmed_fraud_count"] = edge.get("confirmed_fraud_count", 0) + 1
+            # Confirmed-fraud signals are rare and high-value -- persist immediately
+            # rather than waiting for the batch edge-count threshold.
+            self.persist()
+
+    def _confirmed_fraud_boost(self, sender: str, receiver: str) -> float:
+        edge = self._live_edges.get(sender, {}).get(receiver)
+        if not edge:
+            return 0.0
+        fraud_count = edge.get("confirmed_fraud_count", 0)
+        return min(0.5, 0.2 * fraud_count) if fraud_count else 0.0
 
     def _static_metrics_for(self, account_id: str) -> Dict[str, float]:
         row = self._account_metrics.get(account_id)
@@ -195,7 +215,9 @@ class GraphService:
                 scaled_vals.append(self._minmax(col, metrics[col]))
                 
         composite = float(np.mean(scaled_vals)) if scaled_vals else 0.0
-        graph_risk = float(np.clip(0.85 * composite + 0.15 * is_bridge_transaction, 0.0, 1.0))
+        fraud_boost = self._confirmed_fraud_boost(sender, receiver)
+        base_risk = 0.85 * composite + 0.15 * is_bridge_transaction
+        graph_risk = float(np.clip(base_risk + fraud_boost, 0.0, 1.0))
 
         return {
             "sender_graph_out_degree": sender_metrics["graph_out_degree"],

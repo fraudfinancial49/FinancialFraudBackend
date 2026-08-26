@@ -13,11 +13,14 @@ from app.schemas.schemas import (
     OTPVerifyRequest,
     TransactionAssessRequest, TransactionAssessResponse, TransactionExplainResponse,
     TransactionListItem, TransactionListResponse,
+    XAINarrativeRequest, XAINarrativeResponse,
 )
 from app.services import ml_service, feature_pipeline, graph_service as graph_svc_module
 from app.services import honeypot_service
 from app.services import behavioral_service, trust_service, risk_fusion
+from app.services import xai_narrative_service
 from app.services.ml_service import ShapExplainerError
+from app.services.xai_narrative_service import XAINarrativeError
 from app.core.config import settings
 from app.routers.analytics import _date_bounds
 from app.services import otp_service, email_service, ledger_service
@@ -360,6 +363,26 @@ def explain_transaction(
     db.commit()
 
     return TransactionExplainResponse(**response_payload)
+
+
+@router.post("/{transaction_id}/explain-narrative", response_model=XAINarrativeResponse)
+def explain_transaction_narrative(
+    transaction_id: str,
+    payload: XAINarrativeRequest,
+    current_user: models.User = Depends(require_roles("analyst", "admin")),
+):
+    """AI-powered plain-English explanation of a transaction's SHAP breakdown.
+    Takes the already-computed SHAP contributions (the frontend already has
+    them from /explain) and asks a free Hugging Face-hosted LLM to narrate WHY
+    the transaction was flagged. Best-effort: never blocks the visual SHAP
+    charts, which render independently of this call."""
+    try:
+        narrative = xai_narrative_service.generate_narrative(
+            payload.final_risk_score, payload.routing_decision, payload.contributions,
+        )
+    except XAINarrativeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    return XAINarrativeResponse(transaction_id=transaction_id, narrative=narrative, model_used=settings.XAI_LLM_MODEL)
 
 
 @router.post("/{transaction_id}/verify-otp")

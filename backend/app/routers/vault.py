@@ -1,21 +1,11 @@
-from datetime import datetime
-
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.db.base import get_db
 from app.db import models
-from app.core.deps import get_current_user, require_admin
-from app.services import trust_service, otp_service, email_service, ledger_service
-from app.schemas.schemas import VaultOTPVerifyRequest, VaultAdminReviewRequest, VaultMoveRequest, GenericStatus
+from app.core.deps import get_current_user
 
 router = APIRouter(prefix="/api/v1/vault", tags=["safe-vault"])
-
-
-def _log_audit(db: Session, actor_id: str, action: str, target_id: str, details: dict):
-    db.add(models.AuditLog(actor_user_id=actor_id, action=action, target_type="safevault_transaction",
-                           target_id=target_id, details=details))
-    db.commit()
 
 
 @router.get("/cases")
@@ -23,131 +13,35 @@ def list_vault_cases(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Fetches all Safe Vault transactions ordered chronologically (newest first)."""
+    """Fetches all Safe Vault transactions ordered chronologically (newest first),
+    enriched with the underlying transaction's details so the admin UI can show a
+    focused, read-only case view (transaction details + Vault ID). Deliberately
+    read-only: admins cannot manually generate/verify OTPs or override a case's
+    outcome here -- resolution happens entirely through the account holder's own
+    step-up OTP flow on the customer portal (see /api/v1/transactions/{id}/verify-otp)."""
     records = db.query(models.SafeVaultTransaction).order_by(models.SafeVaultTransaction.created_at.desc()).all()
 
-    return [
-        {
+    result = []
+    for r in records:
+        tx = db.query(models.Transaction).filter(models.Transaction.id == r.transaction_id).first()
+        pred = (
+            db.query(models.ModelPrediction)
+            .filter(models.ModelPrediction.transaction_id == r.transaction_id)
+            .order_by(models.ModelPrediction.created_at.desc())
+            .first()
+        )
+        result.append({
             # Explicit string casting ensures UUID objects serialize correctly to JSON
             "vault_id": str(r.id) if r.id else "",
             "transaction_id": str(r.transaction_id) if r.transaction_id else "",
             "status": r.status,
             "reason": r.admin_override_reason,
-            "created_at": r.created_at.isoformat() if r.created_at else None
-        }
-        for r in records
-    ]
-
-
-@router.post("/otp", response_model=GenericStatus)
-def generate_or_verify_otp(
-    payload: VaultOTPVerifyRequest, db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    """Admin-facing OTP step-up for a Safe Vault case. Delegates to the same hashed
-    `otp_service`/`OTPCode` machinery the customer's own /verify-otp endpoint uses,
-    so there is exactly one OTP system regardless of who verifies it -- and exactly
-    one place funds get settled from a successful verification."""
-    vault_record = db.query(models.SafeVaultTransaction).filter(
-        models.SafeVaultTransaction.id == payload.vault_id
-    ).first()
-
-    if vault_record is None:
-        raise HTTPException(status_code=404, detail="Vault record not found.")
-    if vault_record.status != "frozen":
-        raise HTTPException(status_code=400, detail=f"Vault record is not frozen (status={vault_record.status}).")
-
-    tx = db.query(models.Transaction).filter(models.Transaction.id == vault_record.transaction_id).first()
-    if tx is None:
-        raise HTTPException(status_code=404, detail="Underlying transaction not found.")
-
-    # Check if the frontend intentionally requested a new OTP by sending an empty string
-    if not payload.otp_code:
-        code = otp_service.generate_and_store_otp(db, tx.id)
-        customer = db.query(models.Customer).filter(models.Customer.account_id == tx.name_orig).first()
-        emailed = False
-        if customer is not None:
-            emailed = email_service.send_otp_email(customer.email, code, tx.id)
-        message = "OTP generated and emailed to the customer." if emailed else "OTP generated (email delivery unavailable — check server logs)."
-        return GenericStatus(status="otp_issued", message=message)
-
-    # Verification step
-    is_valid, reason = otp_service.verify_otp(db, tx.id, payload.otp_code)
-    if not is_valid:
-        if "expired" in reason.lower() or "locked" in reason.lower():
-            vault_record.status = "rejected"
-            db.commit()
-            trust_service.record_confirmed_outcome(db, tx.name_orig, trust_score=15.0, outcome_source="otp_failed")
-        raise HTTPException(status_code=401, detail=reason)
-
-    vault_record.status = "otp_verified"
-    db.add(vault_record)
-    db.commit()
-
-    ledger_service.settle_transaction(db, tx.name_orig, tx.name_dest, tx.amount)
-    trust_service.record_confirmed_outcome(db, tx.name_orig, trust_score=75.0, outcome_source="otp_verified")
-    _log_audit(db, current_user.id, "vault_otp_verified", vault_record.id, {"transaction_id": tx.id})
-
-    return GenericStatus(status="otp_verified", message="Transaction released from Safe Vault.")
-
-
-@router.post("/review", response_model=GenericStatus)
-def admin_review(
-    payload: VaultAdminReviewRequest, db: Session = Depends(get_db),
-    current_admin: models.User = Depends(require_admin),
-):
-    vault_record = db.query(models.SafeVaultTransaction).filter(
-        models.SafeVaultTransaction.id == payload.vault_id
-    ).first()
-
-    if vault_record is None:
-        raise HTTPException(status_code=404, detail="Vault record not found.")
-
-    tx = db.query(models.Transaction).filter(models.Transaction.id == vault_record.transaction_id).first()
-    if tx is None:
-        raise HTTPException(status_code=404, detail="Underlying transaction not found.")
-
-    vault_record.status = "released" if payload.decision == "approve" else "rejected"
-    vault_record.admin_override_by_user_id = current_admin.id
-    vault_record.admin_override_decision = payload.decision
-    vault_record.admin_override_reason = payload.reason
-    vault_record.admin_override_at = datetime.utcnow()
-    db.add(vault_record)
-    db.commit()
-
-    if payload.decision == "approve":
-        ledger_service.settle_transaction(db, tx.name_orig, tx.name_dest, tx.amount)
-
-    trust_score = 80.0 if payload.decision == "approve" else 10.0
-    trust_service.record_confirmed_outcome(db, tx.name_orig, trust_score=trust_score, outcome_source="admin_override")
-
-    _log_audit(db, current_admin.id, f"vault_review_{payload.decision}", vault_record.id, {"reason": payload.reason})
-
-    return GenericStatus(status="reviewed", message=f"Admin override applied: {payload.decision}.")
-
-
-@router.post("/move-to-vault", response_model=GenericStatus)
-def move_to_vault(
-    payload: VaultMoveRequest, db: Session = Depends(get_db),
-    current_admin: models.User = Depends(require_admin),
-):
-    tx = db.query(models.Transaction).filter(models.Transaction.id == payload.transaction_id).first()
-    if tx is None:
-        raise HTTPException(status_code=404, detail="Transaction not found.")
-
-    existing = db.query(models.SafeVaultTransaction).filter(
-        models.SafeVaultTransaction.transaction_id == tx.id
-    ).first()
-
-    if existing:
-        raise HTTPException(status_code=400, detail="Transaction is already in the Safe Vault.")
-
-    vault_record = models.SafeVaultTransaction(transaction_id=tx.id, status="frozen")
-    db.add(vault_record)
-    db.commit()
-    db.refresh(vault_record)
-
-    _log_audit(db, current_admin.id, "manual_escalation_to_vault", vault_record.id, {"reason": payload.reason})
-
-    return GenericStatus(status="moved_to_vault", message="Transaction manually escalated to Safe Vault.",
-                          data={"vault_id": str(vault_record.id)})
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "name_orig": tx.name_orig if tx else None,
+            "name_dest": tx.name_dest if tx else None,
+            "type": tx.type if tx else None,
+            "amount": tx.amount if tx else None,
+            "final_risk_score": pred.final_risk_score if pred else None,
+            "timestamp": tx.timestamp.isoformat() if tx and tx.timestamp else None,
+        })
+    return result
