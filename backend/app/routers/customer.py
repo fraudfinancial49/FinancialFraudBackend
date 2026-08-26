@@ -2,7 +2,7 @@ import uuid
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
@@ -68,7 +68,15 @@ def _current_customer(db: Session, current_user: models.User) -> models.Customer
 
 
 @router.get("/me/balance", response_model=BalanceOut)
-def get_my_balance(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def get_my_balance(
+    response: Response,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    # Always hit the DB fresh -- a stale cached read here (browser or an
+    # intermediate proxy) is indistinguishable from the ledger itself being
+    # broken, so this endpoint must never be cached.
+    response.headers["Cache-Control"] = "no-store"
     customer = _current_customer(db, current_user)
     balance = db.query(models.Balance).filter(models.Balance.account_id == customer.account_id).first()
     if balance is None:
@@ -78,9 +86,11 @@ def get_my_balance(db: Session = Depends(get_db), current_user: models.User = De
 
 @router.get("/me/transactions", response_model=list[CustomerTransactionOut])
 def get_my_transactions(
+    response: Response,
     page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100),
     db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user),
 ):
+    response.headers["Cache-Control"] = "no-store"
     customer = _current_customer(db, current_user)
     rows = (
         db.query(models.Transaction)
