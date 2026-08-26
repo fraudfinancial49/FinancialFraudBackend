@@ -12,6 +12,20 @@ from app.core.config import settings
 
 logger = logging.getLogger("xai_narrative_service")
 
+# Which models are actually "warm" on a free HF account's enabled providers
+# drifts over time and can't be verified from this codebase -- rather than
+# hardcode one guess that silently breaks again, try `settings.XAI_LLM_MODEL`
+# first (so it stays operator-configurable) then fall through this list of
+# other small, ungated, widely-mirrored instruct models on "auto" routing
+# (tries every provider the account has access to, not just one pinned
+# provider) until one actually answers.
+_FALLBACK_MODELS = [
+    "Qwen/Qwen2.5-7B-Instruct",
+    "HuggingFaceH4/zephyr-7b-beta",
+    "microsoft/Phi-3-mini-4k-instruct",
+    "mistralai/Mistral-7B-Instruct-v0.2",
+]
+
 _SYSTEM_PROMPT = (
     "You are a fraud-analytics assistant explaining a transaction risk score to a bank "
     "fraud analyst. You are given the model's SHAP feature contributions (positive values "
@@ -42,22 +56,33 @@ def generate_narrative(
     )
 
     token = os.getenv("HF_TOKEN") or None
-    client = InferenceClient(model=settings.XAI_LLM_MODEL, token=token)
-    try:
-        response = client.chat_completion(
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_tokens=300,
-            temperature=0.3,
-        )
-        text = response.choices[0].message.content
-        if not text:
-            raise XAINarrativeError("Empty response from the language model.")
-        return text.strip()
-    except XAINarrativeError:
-        raise
-    except Exception as exc:
-        logger.exception("HF Inference narrative generation failed (model=%s).", settings.XAI_LLM_MODEL)
-        raise XAINarrativeError(f"AI narrative generation failed: {exc}") from exc
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    # Configured model first, then the fallback list -- de-duplicated, order
+    # preserved.
+    candidates = list(dict.fromkeys([settings.XAI_LLM_MODEL, *_FALLBACK_MODELS]))
+
+    last_exc: Exception | None = None
+    for model_id in candidates:
+        try:
+            client = InferenceClient(model=model_id, token=token, provider="auto")
+            response = client.chat_completion(messages=messages, max_tokens=300, temperature=0.3)
+            text = response.choices[0].message.content
+            if not text:
+                raise XAINarrativeError("Empty response from the language model.")
+            if model_id != settings.XAI_LLM_MODEL:
+                logger.warning(
+                    "XAI_LLM_MODEL '%s' unavailable -- served this explanation from fallback model '%s' instead.",
+                    settings.XAI_LLM_MODEL, model_id,
+                )
+            return text.strip()
+        except Exception as exc:
+            logger.warning("HF Inference narrative generation failed for model '%s': %s", model_id, exc)
+            last_exc = exc
+            continue
+
+    logger.error("HF Inference narrative generation failed for every candidate model: %s", candidates)
+    raise XAINarrativeError(f"AI narrative generation failed for all candidate models: {last_exc}") from last_exc
