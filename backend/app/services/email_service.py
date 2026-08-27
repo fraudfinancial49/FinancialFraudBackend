@@ -66,7 +66,7 @@ def _send_via_resend(to_email: str, subject: str, body: str) -> bool:
 def send_otp_email(to_email: str, otp: str, transaction_id: str) -> bool:
     """Send OTP email. Tries Brevo first, then Resend as fallback.
     Returns True on success, False on failure. Never raises."""
-    subject = "Your PaySim verification code"
+    subject = "Your FinWallet verification code"
     body = (
         f"Your one-time verification code is: {otp}\n"
         f"It expires in {settings.OTP_EXPIRE_MINUTES} minutes.\n"
