@@ -30,15 +30,29 @@ def _send_via_resend(to_email: str, subject: str, body: str) -> bool:
 def _send_via_smtp(to_email: str, subject: str, body: str) -> bool:
     if not settings.SMTP_USERNAME or not settings.SMTP_PASSWORD:
         return False
+    # Gmail (and most SMTP servers) require the From address to exactly match
+    # the authenticated account. Fall back to SMTP_USERNAME when the config
+    # hasn't been explicitly overridden from its placeholder default.
+    from_addr = settings.SMTP_FROM_EMAIL or settings.SMTP_USERNAME
     try:
         msg = MIMEText(body)
         msg["Subject"] = subject
-        msg["From"] = settings.SMTP_FROM_EMAIL
+        msg["From"] = from_addr
         msg["To"] = to_email
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
-            server.starttls()
-            server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
-            server.sendmail(settings.SMTP_FROM_EMAIL, [to_email], msg.as_string())
+        raw = msg.as_string()
+        if settings.SMTP_PORT == 465:
+            # SSL (recommended for Render — port 587/STARTTLS is often blocked
+            # on PaaS hosts). Set SMTP_PORT=465 in Render env vars to use this.
+            with smtplib.SMTP_SSL(settings.SMTP_HOST, 465, timeout=10) as server:
+                server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+                server.sendmail(from_addr, [to_email], raw)
+        else:
+            # STARTTLS (port 587) — works fine locally / on most VPS.
+            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as server:
+                server.starttls()
+                server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+                server.sendmail(from_addr, [to_email], raw)
+        logger.info("SMTP email sent to %s via %s:%s", to_email, settings.SMTP_HOST, settings.SMTP_PORT)
         return True
     except Exception:
         logger.exception("SMTP send failed to %s", to_email)

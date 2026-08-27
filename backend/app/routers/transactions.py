@@ -1,4 +1,5 @@
 import time
+import threading
 import logging
 from datetime import datetime, date
 from typing import Optional
@@ -231,7 +232,17 @@ def assess_transaction(
         otp_code = otp_service.generate_and_store_otp(db, tx.id)
         customer = db.query(models.Customer).filter(models.Customer.user_id == current_user.id).first()
         if customer is not None:
-            email_service.send_otp_email(customer.email, otp_code, tx.id)
+            # Send email in background thread so the SMTP/Resend network call
+            # does NOT block this HTTP response — the customer sees the OTP
+            # page immediately and the email still arrives within seconds.
+            _to = customer.email
+            _code = otp_code
+            _tx_id = tx.id
+            threading.Thread(
+                target=email_service.send_otp_email,
+                args=(_to, _code, _tx_id),
+                daemon=True,
+            ).start()
         message = "Transaction frozen pending step-up verification (OTP). A code has been emailed to you."
 
     elif routing_decision == "auto_reject":

@@ -106,7 +106,8 @@ class Settings(BaseSettings):
     SMTP_PORT: int = 587
     SMTP_USERNAME: str = ""
     SMTP_PASSWORD: str = ""
-    SMTP_FROM_EMAIL: str = "no-reply@paysim-fraud.local"
+    # Leave blank to auto-use SMTP_USERNAME as the From address (required for Gmail)
+    SMTP_FROM_EMAIL: str = ""
     OTP_EXPIRE_MINUTES: int = 5
     OTP_LENGTH: int = 6
 
