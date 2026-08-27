@@ -57,11 +57,8 @@ class TransactionAssessResponse(BaseModel):
     honeypot_session_id: Optional[str] = None
     vault_id: Optional[str] = None
     auto_reject_id: Optional[str] = None
-    # --- NEW EXPLAINABILITY FIELDS ---
     individual_scores: Optional[Dict[str, float]] = None
     fusion_weights: Optional[Dict[str, float]] = None
-    # --- DEV/STAGING ONLY: OTP plaintext (null in production) ---
-    otp_debug: Optional[str] = None
 
 
 class AutoRejectedTransactionOut(BaseModel):

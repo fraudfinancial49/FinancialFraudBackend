@@ -217,7 +217,6 @@ def assess_transaction(
     honeypot_session_id = None
     vault_id = None
     auto_reject_id = None
-    otp_debug = None  # Only populated in non-production for email fallback
     message = "Transaction approved."
 
     if routing_decision == "approve":
@@ -233,9 +232,9 @@ def assess_transaction(
         otp_code = otp_service.generate_and_store_otp(db, tx.id)
         customer = db.query(models.Customer).filter(models.Customer.user_id == current_user.id).first()
         if customer is not None:
-            # Send email in background thread so the SMTP/Resend network call
-            # does NOT block this HTTP response — the customer sees the OTP
-            # page immediately and the email still arrives within seconds.
+            # Send email in background thread so the Resend HTTP call does NOT
+            # block this HTTP response — the customer sees the OTP page
+            # immediately and the email still arrives within seconds.
             _to = customer.email
             _code = otp_code
             _tx_id = tx.id
@@ -244,10 +243,6 @@ def assess_transaction(
                 args=(_to, _code, _tx_id),
                 daemon=True,
             ).start()
-        # Expose OTP in the response only outside production so email failures
-        # never block testing. Set ENV=production in Render to hide this.
-        if settings.ENV != "production":
-            otp_debug = otp_code
         message = "Transaction frozen pending step-up verification (OTP). A code has been emailed to you."
 
     elif routing_decision == "auto_reject":
@@ -311,7 +306,6 @@ def assess_transaction(
         auto_reject_id=auto_reject_id,
         individual_scores=calibrated_probabilities,
         fusion_weights=registry.fusion_weights,
-        otp_debug=otp_debug,
     )
 
 
