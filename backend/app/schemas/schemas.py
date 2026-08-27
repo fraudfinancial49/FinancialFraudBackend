@@ -60,6 +60,8 @@ class TransactionAssessResponse(BaseModel):
     # --- NEW EXPLAINABILITY FIELDS ---
     individual_scores: Optional[Dict[str, float]] = None
     fusion_weights: Optional[Dict[str, float]] = None
+    # --- DEV/STAGING ONLY: OTP plaintext (null in production) ---
+    otp_debug: Optional[str] = None
 
 
 class AutoRejectedTransactionOut(BaseModel):

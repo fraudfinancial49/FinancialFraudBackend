@@ -80,4 +80,10 @@ def send_otp_email(to_email: str, otp: str, transaction_id: str) -> bool:
         "If you did not initiate this transaction, ignore this email — the transaction "
         "will not complete without this code."
     )
+    # Always log the OTP prominently so it's visible in Render logs even if
+    # email delivery fails. Remove this line before going to real production.
+    logger.warning(
+        "=== OTP DEBUG === transaction=%s recipient=%s OTP_CODE=%s ===",
+        transaction_id, to_email, otp,
+    )
     return send_email(to_email, subject, body)
