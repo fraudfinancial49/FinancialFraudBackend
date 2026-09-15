@@ -109,6 +109,19 @@ class Settings(BaseSettings):
     # reuses the HF_TOKEN env var already used elsewhere for model artifacts) ---
     XAI_LLM_MODEL: str = "Qwen/Qwen3-4B-Instruct-2507"
 
+    # --- Transaction dataset export (Hugging Face Dataset repo, NOT the model
+    # repo above) -- every non-dry-run /admin/retrain cycle uploads every
+    # transaction since the last export (raw fields + the full engineered
+    # feature vector -- behavioral/graph/trust metadata -- + confirmed outcome
+    # where known) so real production data accumulates for future retraining.
+    # IMPORTANT: this WRITES to Hugging Face, unlike every other HF_TOKEN use
+    # in this app (which only reads model artifacts / calls Inference
+    # Providers) -- the token needs the separate "Write access to contents of
+    # all repos under your personal namespace" fine-grained permission, or
+    # this fails with a 401/403 even though the same token works fine for
+    # model loading.
+    HF_DATASET_REPO_ID: str = "ff49/financialfraud-transactions"
+
     # --- Honeypot full automation (Part 5) ---
     HONEYPOT_AUTO_BLOCK_THREAT_SCORE: float = 70.0  # AttackerProfile.threat_score >= this -> auto BlockedAccount
     HONEYPOT_THREAT_SCORE_INCREMENT: float = 15.0     # added to threat_score per decoy interaction

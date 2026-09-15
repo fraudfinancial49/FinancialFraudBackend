@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.db.base import get_db
 from app.db import models
 from app.core.deps import require_admin
-from app.services import threat_intel, ml_service, trust_service, behavioral_service
+from app.services import threat_intel, ml_service, trust_service, behavioral_service, hf_dataset_export_service
 from app.services.graph_service import graph_service
 from app.schemas.schemas import (
     FeedbackSubmitRequest, GenericStatus, AdminRetrainRequest, AdminRetrainResponse, AccountTransactionOut,
@@ -121,6 +121,25 @@ def trigger_retrain(
     cache_entries_flushed = db.query(models.CacheEntry).delete(synchronize_session=False)
     db.commit()
 
+    # --- 3.5) Export accumulated transaction data (raw fields + full behavioral/
+    # graph/trust feature vector + confirmed outcome) to the Hugging Face dataset
+    # repo, so real production data is available for actual future retraining --
+    # not just this simulated champion/challenger check. Best-effort: an HF
+    # outage or a misconfigured token must not fail the whole retrain cycle,
+    # same convention as this codebase's other external-service calls (email).
+    hf_export_count = 0
+    hf_dataset_repo = None
+    if not payload.dry_run:
+        try:
+            hf_result = hf_dataset_export_service.export_pending_transactions(db)
+            hf_export_count = hf_result["exported_count"]
+            hf_dataset_repo = hf_result["repo_id"]
+            if hf_export_count:
+                run_message += f" Exported {hf_export_count} transaction(s) to Hugging Face dataset '{hf_dataset_repo}'."
+        except hf_dataset_export_service.HFDatasetExportError as exc:
+            _ops_logger.warning("Hugging Face dataset export skipped: %s", exc)
+            run_message += f" Hugging Face export failed: {exc}"
+
     run.labels_processed = len(pending_labels)
     run.fraud_labels = fraud_labels
     run.legitimate_labels = legitimate_labels
@@ -137,7 +156,8 @@ def trigger_retrain(
             "labels_processed": run.labels_processed, "fraud_labels": fraud_labels,
             "legitimate_labels": legitimate_labels, "cache_entries_flushed": cache_entries_flushed,
             "dry_run": payload.dry_run, "notes": payload.notes,
-            "evaluation_result": run_message
+            "evaluation_result": run_message,
+            "hf_export_count": hf_export_count, "hf_dataset_repo": hf_dataset_repo,
         },
     )
     db.add(audit_entry)
@@ -145,9 +165,9 @@ def trigger_retrain(
 
     _ops_logger.info(
         "retrain_run_id=%s actor=%s labels_processed=%d fraud=%d legitimate=%d "
-        "cache_entries_flushed=%d dry_run=%s result='%s'",
+        "cache_entries_flushed=%d dry_run=%s hf_export_count=%d hf_dataset_repo=%s result='%s'",
         run.id, current_admin.email, run.labels_processed, fraud_labels,
-        legitimate_labels, cache_entries_flushed, payload.dry_run, run_message
+        legitimate_labels, cache_entries_flushed, payload.dry_run, hf_export_count, hf_dataset_repo, run_message
     )
 
     return AdminRetrainResponse(
@@ -155,6 +175,8 @@ def trigger_retrain(
         legitimate_labels=legitimate_labels, cache_entries_flushed=cache_entries_flushed,
         retrain_run_id=run.id,
         message=run_message,
+        hf_export_count=hf_export_count,
+        hf_dataset_repo=hf_dataset_repo,
     )
 
 

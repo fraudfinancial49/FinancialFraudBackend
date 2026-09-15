@@ -80,6 +80,7 @@ def _ensure_incrementally_added_columns():
         ("honeypot_events", "payload", "JSON", False),
         ("honeypot_events", "stage", "VARCHAR(40)", True),
         ("honeypot_events", "detail", "TEXT", False),
+        ("transactions", "exported_to_hf", "BOOLEAN NOT NULL DEFAULT FALSE", True),
     ]
     for table, column, col_type, should_index in patches:
         if table not in inspector.get_table_names():

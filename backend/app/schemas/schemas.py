@@ -149,6 +149,8 @@ class AdminRetrainResponse(BaseModel):
     cache_entries_flushed: int
     retrain_run_id: str
     message: str
+    hf_export_count: int = 0
+    hf_dataset_repo: Optional[str] = None
 
 
 # --- Analytics & transaction history ---

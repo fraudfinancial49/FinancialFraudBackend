@@ -68,6 +68,10 @@ class Transaction(Base):
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     created_by_user_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
     source = Column(String(20), nullable=False, default="manual_sandbox", index=True)
+    # Export watermark for the Hugging Face dataset upload (hf_dataset_export_service) --
+    # lets each /admin/retrain cycle only ship transactions it hasn't already exported,
+    # instead of re-uploading the whole table every time.
+    exported_to_hf = Column(Boolean, default=False, nullable=False, index=True)
     predictions = relationship("ModelPrediction", back_populates="transaction", uselist=False)
     vault_record = relationship("SafeVaultTransaction", back_populates="transaction", uselist=False)
 
