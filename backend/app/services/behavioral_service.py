@@ -130,8 +130,8 @@ def record_feedback_outcome(db: Session, account_id: str, is_fraud: bool) -> mod
 # TREND for one account across its own history, not the absolute risk of a
 # single transaction.
 _ROUTING_SEVERITY = {"otp_verification": 50.0, "auto_reject": 70.0, "honeypot": 90.0}
-_MIN_BASELINE_APPROVE_RATIO = 0.75  # baseline must be "mostly approved" to call a shift meaningful
-_MIN_SPIKE_RATIO = 3.0              # recent amount must be >= 3x the historical average
+_MIN_BASELINE_APPROVE_RATIO = 0.6   # baseline must be "mostly approved" to call a shift meaningful
+_MIN_SPIKE_RATIO = 2.5              # recent amount must be >= 2.5x the historical average
 _MIN_TRANSACTIONS = 3               # need at least this many scored transactions for a baseline
 _MAX_CANDIDATE_ACCOUNTS = 300       # bounds the scan on a demo-scale database
 
