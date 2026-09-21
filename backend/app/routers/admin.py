@@ -2,6 +2,7 @@ import logging
 import os
 import random
 from datetime import datetime
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import or_
@@ -15,6 +16,7 @@ from app.services.graph_service import graph_service
 from app.schemas.schemas import (
     FeedbackSubmitRequest, GenericStatus, AdminRetrainRequest, AdminRetrainResponse, AccountTransactionOut,
     AccountTransactionsResponse, AccountBlockRequest, AccountUnblockRequest, AccountBlockStatusOut,
+    BehavioralAnomalyOut,
 )
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
@@ -263,6 +265,20 @@ def _derive_transaction_status(db: Session, tx: models.Transaction, pred) -> str
             return "pending_otp"
         return _VAULT_STATUS_TO_TX_STATUS.get(vault.status, vault.status)
     return pred.routing_decision or "pending"
+
+
+@router.get("/behavioral-anomalies", response_model=List[BehavioralAnomalyOut])
+def get_behavioral_anomalies(
+    limit: int = 15,
+    db: Session = Depends(get_db),
+    current_admin: models.User = Depends(require_admin),
+):
+    """Read-only analytical scan (Account Lookup dashboard panel) -- flags
+    accounts whose most recent transaction broke sharply from their own
+    historical baseline: previously-safe accounts that just triggered a
+    riskier routing tier, and/or a sudden multi-x spike in transaction amount
+    versus their own average. Never affects live scoring."""
+    return behavioral_service.detect_behavioral_anomalies(db, limit=limit)
 
 
 @router.get("/accounts/{account_id}/transactions", response_model=AccountTransactionsResponse)

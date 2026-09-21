@@ -4,9 +4,12 @@ variance algorithm — average and standard deviation stay numerically stable
 without ever scanning that account's historical transaction rows.
 """
 import math
+import statistics
+from collections import Counter
 from datetime import datetime
-from typing import Dict
+from typing import Dict, List
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db import models
@@ -113,3 +116,101 @@ def record_feedback_outcome(db: Session, account_id: str, is_fraud: bool) -> mod
     db.commit()
     db.refresh(profile)
     return profile
+
+
+# ---------------------------------------------------------------------------
+# BEHAVIORAL ANOMALY DETECTION (Account Lookup dashboard panel)
+# ---------------------------------------------------------------------------
+# Not part of the live scoring pipeline -- purely a read-only analytical scan,
+# admin-triggered (GET /admin/behavioral-anomalies), that flags accounts whose
+# most recent transaction deviates sharply from their own historical baseline:
+# a previously-safe account (mostly "approve") that just triggered a riskier
+# tier, and/or a sudden multi-x spike in transaction amount versus their own
+# average. Distinct from the live per-account risk score -- this looks at the
+# TREND for one account across its own history, not the absolute risk of a
+# single transaction.
+_ROUTING_SEVERITY = {"otp_verification": 50.0, "auto_reject": 70.0, "honeypot": 90.0}
+_MIN_BASELINE_APPROVE_RATIO = 0.75  # baseline must be "mostly approved" to call a shift meaningful
+_MIN_SPIKE_RATIO = 3.0              # recent amount must be >= 3x the historical average
+_MIN_TRANSACTIONS = 3               # need at least this many scored transactions for a baseline
+_MAX_CANDIDATE_ACCOUNTS = 300       # bounds the scan on a demo-scale database
+
+
+def detect_behavioral_anomalies(db: Session, limit: int = 15) -> List[Dict[str, object]]:
+    """Scans accounts with enough scored history and flags ones whose most
+    recent transaction broke sharply from their own baseline -- either a
+    routing-tier shift (previously safe, now risky) or an amount spike (or
+    both). Read-only, admin-triggered; never affects live scoring."""
+    candidate_rows = (
+        db.query(models.Transaction.name_orig)
+        .join(models.ModelPrediction, models.ModelPrediction.transaction_id == models.Transaction.id)
+        .group_by(models.Transaction.name_orig)
+        .having(func.count(models.ModelPrediction.id) >= _MIN_TRANSACTIONS)
+        .limit(_MAX_CANDIDATE_ACCOUNTS)
+        .all()
+    )
+
+    results: List[Dict[str, object]] = []
+    for (account_id,) in candidate_rows:
+        rows = (
+            db.query(models.Transaction, models.ModelPrediction)
+            .join(models.ModelPrediction, models.ModelPrediction.transaction_id == models.Transaction.id)
+            .filter(models.Transaction.name_orig == account_id)
+            .order_by(models.Transaction.timestamp.asc())
+            .all()
+        )
+        if len(rows) < _MIN_TRANSACTIONS:
+            continue
+
+        historical = rows[:-1]
+        recent_tx, recent_pred = rows[-1]
+
+        baseline_counts = Counter(pred.routing_decision for _, pred in historical)
+        baseline_dominant = baseline_counts.most_common(1)[0][0]
+        baseline_approve_ratio = baseline_counts.get("approve", 0) / len(historical)
+        recent_routing = recent_pred.routing_decision
+
+        routing_shift = (
+            baseline_approve_ratio >= _MIN_BASELINE_APPROVE_RATIO
+            and recent_routing in _ROUTING_SEVERITY
+        )
+
+        historical_amounts = [tx.amount for tx, _ in historical]
+        hist_mean = statistics.fmean(historical_amounts) if historical_amounts else 0.0
+        recent_amount = recent_tx.amount
+        spike_ratio = (recent_amount / hist_mean) if hist_mean > 0 else 0.0
+        amount_spike = hist_mean > 0 and spike_ratio >= _MIN_SPIKE_RATIO
+
+        if not routing_shift and not amount_spike:
+            continue
+
+        severity = 0.0
+        if routing_shift:
+            severity += _ROUTING_SEVERITY.get(recent_routing, 40.0) * baseline_approve_ratio
+        if amount_spike:
+            severity += min(40.0, (spike_ratio - 1.0) * 8.0)
+        severity = min(100.0, severity)
+
+        if routing_shift and amount_spike:
+            anomaly_type = "both"
+        elif routing_shift:
+            anomaly_type = "routing_shift"
+        else:
+            anomaly_type = "amount_spike"
+
+        results.append({
+            "account_id": account_id,
+            "anomaly_type": anomaly_type,
+            "baseline_routing": baseline_dominant,
+            "baseline_approve_ratio": round(baseline_approve_ratio, 3),
+            "recent_routing": recent_routing,
+            "historical_avg_amount": round(hist_mean, 2),
+            "recent_amount": recent_amount,
+            "spike_ratio": round(spike_ratio, 2),
+            "severity_score": round(severity, 1),
+            "transaction_count": len(rows),
+            "last_transaction_at": recent_tx.timestamp,
+        })
+
+    results.sort(key=lambda r: r["severity_score"], reverse=True)
+    return results[:limit]

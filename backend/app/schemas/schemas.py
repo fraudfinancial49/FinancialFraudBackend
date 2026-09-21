@@ -153,6 +153,20 @@ class AdminRetrainResponse(BaseModel):
     hf_dataset_repo: Optional[str] = None
 
 
+class BehavioralAnomalyOut(BaseModel):
+    account_id: str
+    anomaly_type: str  # "routing_shift" | "amount_spike" | "both"
+    baseline_routing: str
+    baseline_approve_ratio: float
+    recent_routing: str
+    historical_avg_amount: float
+    recent_amount: float
+    spike_ratio: float
+    severity_score: float
+    transaction_count: int
+    last_transaction_at: datetime
+
+
 # --- Analytics & transaction history ---
 class TransactionAnalyticsSummary(BaseModel):
     start_date: str
