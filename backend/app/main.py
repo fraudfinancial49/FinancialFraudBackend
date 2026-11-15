@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.db.base import Base, engine
 from app.services.feature_pipeline import FeatureSchemaError
 from app.services.ml_service import ShapExplainerError, registry as ml_registry
+from app.services.graph_service import graph_service
 from app.routers import auth, transactions, vault, honeypot, admin, ops, analytics, customer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
@@ -128,10 +129,11 @@ def on_startup():
     # Flags the model registry as loaded so endpoints can begin processing requests
     ml_registry.load()
     
-    # OOM PREVENTION FIX: Bulk loading of the 341MB graph structure is deferred 
-    # from application boot up to request-time lazy evaluation.
-    logger.info("Graph Service infrastructure initialized in lazy-load mode.")
-    
+    # Graph metrics live in a slim on-disk SQLite file (queried per-transaction).
+    # prewarm() downloads it in a background thread: non-blocking, no RAM spike.
+    # Until it is ready, graph_risk is silently bypassed (never an error).
+    graph_service.prewarm()
+
     logger.info("Startup complete. Backend ready for lazy-loaded inference.")
 
 
