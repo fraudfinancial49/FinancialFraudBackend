@@ -15,7 +15,7 @@ top at a small, fixed supplemental weight, with every weight (Phase 3's frozen
 9 signals + this one) renormalized together so the final blend still sums to 1.0.
 """
 import logging
-from typing import Dict
+from typing import Dict, Optional
 
 from sqlalchemy.orm import Session
 
@@ -77,7 +77,7 @@ def fuse(
     calibrated_probabilities: Dict[str, float],
     trust_risk: float,
     behavioral_risk: float,
-    graph_risk: float,
+    graph_risk: Optional[float],
     threat_score: float,
     fusion_weights: Dict[str, float],
 ) -> float:
@@ -92,7 +92,10 @@ def fuse(
     components: Dict[str, float] = dict(calibrated_probabilities)
     components["trust_risk"] = trust_risk
     components["behavioral_risk"] = behavioral_risk
-    components["graph_risk"] = graph_risk
+    # graph_risk=None means the Phase 2 graph artifact is unavailable: drop the
+    # signal. The renormalisation below spreads its weight over the other signals.
+    if graph_risk is not None:
+        components["graph_risk"] = graph_risk
 
     phase3_weight_sum = sum(weights.get(k, 0.0) for k in components) or 1.0
     # Renormalize Phase 3's frozen weights down to (1 - supplemental), then add
@@ -103,7 +106,7 @@ def fuse(
     fused_0_1 += (threat_score / 100.0) * THREAT_SCORE_SUPPLEMENTAL_WEIGHT
 
     logger.info(
-        "calibrated_probabilities=%s trust_risk=%.4f behavioral_risk=%.4f graph_risk=%.4f threat_score=%.4f weights=%s",
+        "calibrated_probabilities=%s trust_risk=%.4f behavioral_risk=%.4f graph_risk=%s threat_score=%.4f weights=%s",
         calibrated_probabilities, trust_risk, behavioral_risk, graph_risk, threat_score, weights
     )
 
