@@ -196,7 +196,7 @@ def assess_transaction(
     prediction = models.ModelPrediction(
         transaction_id=tx.id, ml_ensemble_score=best_model_probability * 100.0,
         behavioral_risk_score=feature_dict["behavioral_risk_score"], trust_score=trust_score,
-        graph_risk_score=graph_snapshot["graph_risk"] * 100.0, threat_score=threat_score,
+        graph_risk_score=(graph_snapshot["graph_risk"] or 0.0) * 100.0, threat_score=threat_score,
         final_risk_score=final_risk_score, best_model_name=registry.best_model_name,
         isolation_forest_anomaly=iso_anomaly, routing_decision=routing_decision,
         latency_ms=latency_ms,
