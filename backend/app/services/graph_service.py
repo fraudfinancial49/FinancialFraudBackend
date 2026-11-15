@@ -1,14 +1,14 @@
 import os
+import json
+import sqlite3
 import logging
 import threading
-import gc
+import time
 from typing import Dict, Optional, Tuple
 
 import joblib
 import numpy as np
-import pandas as pd
 from huggingface_hub import hf_hub_download
-from huggingface_hub.utils import EntryNotFoundError
 
 from app.core.config import settings
 
@@ -16,103 +16,97 @@ logger = logging.getLogger("graph_service")
 
 GRAPH_METRIC_COLS = ["graph_out_degree", "graph_pagerank", "graph_hub_score", "graph_authority_score"]
 
+# Slim, disk-backed artifact (built offline from graph_weight_maps.joblib).
+GRAPH_SQLITE_FILE = "graph_metrics.sqlite"
+RETRY_AFTER_SECONDS = 300
+
 
 class GraphService:
+    """Phase 2 graph metrics served from a small read-only SQLite file instead of
+    a resident 341MB joblib/DataFrame. RAM cost is a few MB: only the 2 rows a
+    transaction needs are read per request. If the artifact is unavailable the
+    service silently reports `available=False` and the caller skips graph_risk."""
+
     def __init__(self) -> None:
-        # No full DataFrame held in RAM anymore -- replaced by a lean per-account
-        # dict of small tuples, built once at load time then the DataFrame and
-        # the raw joblib payload are dropped immediately.
-        self._account_metrics: Dict[str, Tuple[float, float, float, float, int]] = {}
         self.community_sizes: Dict[int, int] = {}
-        self.modularity_score: float = float("nan")
-        self.n_communities: int = 0
-        self.trust_weights: Dict[str, float] = {}
-        self.risk_weights: Dict[str, float] = {}
         self._metric_min: Dict[str, float] = {}
         self._metric_max: Dict[str, float] = {}
+
+        self._conn: Optional[sqlite3.Connection] = None
+        self._db_lock = threading.Lock()
+        self._next_retry_at = 0.0
+        self._loading = False
 
         self._live_edges: Dict[str, Dict[str, Dict[str, float]]] = {}
         self._lock = threading.Lock()
         self._edges_since_persist = 0
-        self.loaded = False
+        self.loaded = False  # True only once the SQLite artifact is open
 
         self.repo_id = "ff49/financialfraudmodel"
         self.token = os.getenv("HF_TOKEN")
+        self._load_live_state()
 
     def _live_state_path(self) -> str:
         return os.path.join(settings.RUNTIME_STATE_DIR, settings.LIVE_GRAPH_STATE_FILE)
 
-    def _fetch_phase2_artifact(self) -> Optional[str]:
-        repo_filepath = os.path.join(
-            settings.PHASE2_ARTIFACTS_SUBDIR, settings.PHASE2_GRAPH_WEIGHT_MAPS_FILE
-        ).replace(os.sep, "/")
+    @property
+    def available(self) -> bool:
+        return self._ensure_ready()
+
+    def _open_artifact(self) -> None:
+        """Blocking download + open. Runs ONLY in the background thread."""
         try:
-            return hf_hub_download(repo_id=self.repo_id, filename=repo_filepath, token=self.token)
-        except (EntryNotFoundError, Exception) as exc:
-            logger.warning("Could not fetch %s from HF Hub (%s).", repo_filepath, exc)
-            return None
+            repo_filepath = f"{settings.PHASE2_ARTIFACTS_SUBDIR}/{GRAPH_SQLITE_FILE}"
+            path = hf_hub_download(repo_id=self.repo_id, filename=repo_filepath, token=self.token)
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+            meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
+            bounds = json.loads(meta.get("bounds", "{}"))
+            self._metric_min = {k: float(v[0]) for k, v in bounds.items()}
+            self._metric_max = {k: float(v[1]) for k, v in bounds.items()}
+            self.community_sizes = {int(k): int(v) for k, v in json.loads(meta.get("community_sizes", "{}")).items()}
+            self._conn = conn
+            self.loaded = True
+            logger.info("Graph metrics artifact ready (SQLite, disk-backed).")
+        except Exception as exc:
+            self._next_retry_at = time.time() + RETRY_AFTER_SECONDS
+            logger.warning("Graph metrics unavailable (%s) -- graph_risk bypassed, retry in %ds.",
+                           exc, RETRY_AFTER_SECONDS)
+        finally:
+            self._loading = False
 
-    def load(self) -> None:
-        """Attempts to load the structural graph metrics from Hugging Face Hub dynamically."""
-        if self.loaded:
+    def prewarm(self) -> None:
+        """Starts the download in a background thread (non-blocking). Safe to call
+        repeatedly; call once at startup so the file is ready before traffic."""
+        if self._conn is not None or self._loading or time.time() < self._next_retry_at:
             return
-
-        with self._lock:
-            if self.loaded:
+        with self._db_lock:
+            if self._conn is not None or self._loading:
                 return
-                
-            try:
-                logger.info("Lazy-loading Graph Service payload from HF Hub...")
-                path = self._fetch_phase2_artifact()
-                if path is not None:
-                    weight_maps = joblib.load(path)
-                    df = weight_maps.get("account_graph_metrics")
-                    self.community_sizes = weight_maps.get("community_sizes", {})
-                    self.modularity_score = float(weight_maps.get("modularity_score", float("nan")))
-                    self.n_communities = int(weight_maps.get("n_communities", 0))
-                    self.trust_weights = weight_maps.get("trust_weights", {})
-                    self.risk_weights = weight_maps.get("risk_weights", {})
+            self._loading = True
+        threading.Thread(target=self._open_artifact, name="graph-prewarm", daemon=True).start()
 
-                    if df is not None and not df.empty:
-                        self._fit_metric_bounds(df)
-                        # Collapse to plain float32/int32 tuples -- a pandas DataFrame
-                        # with its Index, dtype overhead, and block manager costs far
-                        # more RAM per row than a dict of primitive tuples does.
-                        for col in GRAPH_METRIC_COLS:
-                            if col not in df.columns:
-                                df[col] = 0.0
-                        if "community_id" not in df.columns:
-                            df["community_id"] = -1
-                        for account_id, row in zip(
-                            df.index,
-                            df[GRAPH_METRIC_COLS + ["community_id"]].itertuples(index=False, name=None),
-                        ):
-                            self._account_metrics[str(account_id)] = (
-                                float(row[0]), float(row[1]), float(row[2]), float(row[3]), int(row[4]),
-                            )
-                        n_accounts = len(self._account_metrics)
-                        del df, weight_maps  # drop the heavy pandas/joblib payload immediately
-                        logger.info(
-                            "Loaded frozen Phase 2 graph metrics from HF Hub: %d accounts, %d communities, "
-                            "modularity=%.4f (lean dict, no resident DataFrame).",
-                            n_accounts, self.n_communities, self.modularity_score,
-                        )
-                    else:
-                        logger.warning("graph_weight_maps.joblib had no account_graph_metrics -- empty snapshot.")
-                else:
-                    logger.warning("graph_weight_maps.joblib unavailable from HF Hub.")
-            except (MemoryError, Exception) as exc:
-                logger.error("RAM headroom exceeded during graph parsing (%s). Safely falling back.", exc)
+    def _ensure_ready(self) -> bool:
+        """Never blocks a request. True only if the artifact is already open;
+        otherwise kicks off the background load and the caller bypasses graph_risk."""
+        if self._conn is not None:
+            return True
+        self.prewarm()
+        return False
 
-        self._load_live_state()
-        self.loaded = True
-
-    def _fit_metric_bounds(self, df: pd.DataFrame) -> None:
-        """Same as before, computed once off the DataFrame before it's discarded."""
-        for col in GRAPH_METRIC_COLS:
-            if col in df.columns:
-                self._metric_min[col] = float(df[col].min())
-                self._metric_max[col] = float(df[col].max())
+    def _lookup(self, account_id: str) -> Optional[Tuple[float, float, float, float, int]]:
+        if self._conn is None:
+            return None
+        try:
+            with self._db_lock:
+                row = self._conn.execute(
+                    "SELECT out_degree, pagerank, hub, authority, community_id FROM accounts WHERE account_id = ?",
+                    (account_id,),
+                ).fetchone()
+        except Exception:
+            return None
+        if row is None:
+            return None
+        return float(row[0]), float(row[1]), float(row[2]), float(row[3]), int(row[4])
 
     def _load_live_state(self) -> None:
         path = self._live_state_path()
@@ -160,7 +154,7 @@ class GraphService:
         return min(0.5, 0.2 * fraud_count) if fraud_count else 0.0
 
     def _static_metrics_for(self, account_id: str) -> Dict[str, float]:
-        row = self._account_metrics.get(account_id)
+        row = self._lookup(account_id)
         if row is None:
             # Safe runtime fallback boundaries for feature compliance
             # Avoids looking up empty keys or causing structural mapping errors
@@ -192,12 +186,11 @@ class GraphService:
         lo = self._metric_min.get(col)
         hi = self._metric_max.get(col)
         if lo is None or hi is None or hi <= lo:
-            # Runtime schema fallback limits
-            return 0.02
+            return 0.0
         return float(np.clip((value - lo) / (hi - lo), 0.0, 1.0))
 
-    def account_risk_snapshot(self, sender: str, receiver: str) -> Dict[str, float]:
-        # Bypassed loading tracking files to insulate Render instances from OOM crashes
+    def account_risk_snapshot(self, sender: str, receiver: str) -> Dict[str, Optional[float]]:
+        graph_ready = self._ensure_ready()
         sender_metrics = self._static_metrics_for(sender)
         receiver_metrics = self._static_metrics_for(receiver)
 
@@ -217,7 +210,11 @@ class GraphService:
         composite = float(np.mean(scaled_vals)) if scaled_vals else 0.0
         fraud_boost = self._confirmed_fraud_boost(sender, receiver)
         base_risk = 0.85 * composite + 0.15 * is_bridge_transaction
-        graph_risk = float(np.clip(base_risk + fraud_boost, 0.0, 1.0))
+        graph_risk: Optional[float] = float(np.clip(base_risk + fraud_boost, 0.0, 1.0))
+        if not graph_ready:
+            # Silent bypass: no real Phase 2 data, so don't inject a fake constant
+            # into fusion. Admin-confirmed fraud on this exact edge is still real.
+            graph_risk = float(min(1.0, fraud_boost)) if fraud_boost > 0 else None
 
         return {
             "sender_graph_out_degree": sender_metrics["graph_out_degree"],
