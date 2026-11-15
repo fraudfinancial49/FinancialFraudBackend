@@ -3,12 +3,13 @@ import json
 import sqlite3
 import logging
 import threading
+import shutil
 import time
+import urllib.request
 from typing import Dict, Optional, Tuple
 
 import joblib
 import numpy as np
-from huggingface_hub import hf_hub_download
 
 from app.core.config import settings
 
@@ -19,6 +20,7 @@ GRAPH_METRIC_COLS = ["graph_out_degree", "graph_pagerank", "graph_hub_score", "g
 # Slim, disk-backed artifact (built offline from graph_weight_maps.joblib).
 GRAPH_SQLITE_FILE = "graph_metrics.sqlite"
 RETRY_AFTER_SECONDS = 300
+CHUNK_BYTES = 1024 * 1024  # 1 MB streaming chunks -> ~1 MB RAM during download
 
 
 class GraphService:
@@ -53,11 +55,33 @@ class GraphService:
     def available(self) -> bool:
         return self._ensure_ready()
 
+    def _artifact_url(self) -> str:
+        override = os.getenv("GRAPH_ARTIFACT_URL")
+        if override:
+            return override
+        return (f"https://huggingface.co/{self.repo_id}/resolve/main/"
+                f"{settings.PHASE2_ARTIFACTS_SUBDIR}/{GRAPH_SQLITE_FILE}")
+
+    def _download_artifact(self) -> str:
+        """Plain chunked HTTP download straight to disk. Deliberately NOT
+        hf_hub_download: its xet backend buffers heavily and OOM-kills a 512MB
+        instance. Here RAM use is ~CHUNK_BYTES regardless of file size."""
+        dest = os.path.join(settings.RUNTIME_STATE_DIR, GRAPH_SQLITE_FILE)
+        if os.path.isfile(dest) and os.path.getsize(dest) > 0:
+            return dest
+        part = dest + ".part"
+        # Public repo -> no auth header (a bearer token must not be forwarded to the
+        # signed CDN redirect). urllib follows the HF 302 redirect automatically.
+        req = urllib.request.Request(self._artifact_url(), headers={"User-Agent": "finfraudshield-backend"})
+        with urllib.request.urlopen(req, timeout=60) as resp, open(part, "wb") as fh:
+            shutil.copyfileobj(resp, fh, CHUNK_BYTES)
+        os.replace(part, dest)
+        return dest
+
     def _open_artifact(self) -> None:
         """Blocking download + open. Runs ONLY in the background thread."""
         try:
-            repo_filepath = f"{settings.PHASE2_ARTIFACTS_SUBDIR}/{GRAPH_SQLITE_FILE}"
-            path = hf_hub_download(repo_id=self.repo_id, filename=repo_filepath, token=self.token)
+            path = self._download_artifact()
             conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
             meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
             bounds = json.loads(meta.get("bounds", "{}"))
