@@ -77,6 +77,10 @@ class GraphService:
     def prewarm(self) -> None:
         """Starts the download in a background thread (non-blocking). Safe to call
         repeatedly; call once at startup so the file is ready before traffic."""
+        # Kill switch: set GRAPH_PREWARM=0 in the environment to skip the download
+        # entirely (graph_risk stays silently bypassed). Used to isolate OOM causes.
+        if os.getenv("GRAPH_PREWARM", "1").strip() == "0":
+            return
         if self._conn is not None or self._loading or time.time() < self._next_retry_at:
             return
         with self._db_lock:
