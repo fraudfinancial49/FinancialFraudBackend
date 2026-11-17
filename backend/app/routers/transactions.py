@@ -386,17 +386,29 @@ def explain_transaction(
 @router.post("/{transaction_id}/explain-narrative", response_model=XAINarrativeResponse)
 def explain_transaction_narrative(
     transaction_id: str,
-    payload: XAINarrativeRequest,
+    db: Session = Depends(get_db),
     current_user: models.User = Depends(require_roles("analyst", "admin")),
 ):
-    """AI-powered plain-English explanation of a transaction's SHAP breakdown.
-    Takes the already-computed SHAP contributions (the frontend already has
-    them from /explain) and asks a free Hugging Face-hosted LLM to narrate WHY
-    the transaction was flagged. Best-effort: never blocks the visual SHAP
-    charts, which render independently of this call."""
+    """AI plain-English explanation of a transaction's SHAP breakdown. All inputs
+    (risk score, routing decision, SHAP contributions) are read from the database
+    -- nothing is trusted from the client. Requires /explain to have run first
+    (it persists the SHAP result in the cache table)."""
+    prediction = (
+        db.query(models.ModelPrediction)
+        .filter(models.ModelPrediction.transaction_id == transaction_id)
+        .order_by(models.ModelPrediction.created_at.desc())
+        .first()
+    )
+    if prediction is None:
+        raise HTTPException(status_code=404, detail="No stored model prediction for this transaction.")
+    cached = db.query(models.CacheEntry).filter(
+        models.CacheEntry.cache_key == f"shap_explanation:{transaction_id}"
+    ).first()
+    if cached is None:
+        raise HTTPException(status_code=409, detail="SHAP explanation not generated yet — call /explain first.")
     try:
         narrative = xai_narrative_service.generate_narrative(
-            payload.final_risk_score, payload.routing_decision, payload.contributions,
+            prediction.final_risk_score, prediction.routing_decision, dict(cached.payload).get("contributions", {}),
         )
     except XAINarrativeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
