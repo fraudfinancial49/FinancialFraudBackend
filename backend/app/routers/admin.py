@@ -184,24 +184,40 @@ def trigger_retrain(
 
 @router.get("/attacker-profiles")
 def list_attacker_profiles(db: Session = Depends(get_db), current_admin: models.User = Depends(require_admin)):
-    """Fetches all generated attacker profiles, sorted by highest threat score."""
+    """Minimal list view (no IPs/location/session stats) sorted by threat score.
+    Full details are fetched on demand via GET /attacker-profiles/{fingerprint}."""
     profiles = db.query(models.AttackerProfile).order_by(models.AttackerProfile.threat_score.desc()).all()
-    
     return [
         {
             "browser_fingerprint": p.browser_fingerprint,
-            "simulated_ip": p.simulated_ip,
-            "actual_ip": p.actual_ip,
-            "location": p.location,
-            "total_sessions": p.total_sessions,
-            "avg_session_duration_seconds": p.avg_session_duration_seconds,
-            "avg_events_per_session": p.avg_events_per_session,
             "cluster_label": p.cluster_label,
             "threat_score": p.threat_score,
-            "last_seen_at": p.last_seen_at.isoformat() if p.last_seen_at else None
+            "last_seen_at": p.last_seen_at.isoformat() if p.last_seen_at else None,
         }
         for p in profiles
     ]
+
+
+@router.get("/attacker-profiles/{browser_fingerprint}")
+def get_attacker_profile(
+    browser_fingerprint: str, db: Session = Depends(get_db),
+    current_admin: models.User = Depends(require_admin),
+):
+    p = db.query(models.AttackerProfile).filter(models.AttackerProfile.browser_fingerprint == browser_fingerprint).first()
+    if p is None:
+        raise HTTPException(status_code=404, detail="Attacker profile not found.")
+    return {
+        "browser_fingerprint": p.browser_fingerprint,
+        "simulated_ip": p.simulated_ip,
+        "actual_ip": p.actual_ip,
+        "location": p.location,
+        "total_sessions": p.total_sessions,
+        "avg_session_duration_seconds": p.avg_session_duration_seconds,
+        "avg_events_per_session": p.avg_events_per_session,
+        "cluster_label": p.cluster_label,
+        "threat_score": p.threat_score,
+        "last_seen_at": p.last_seen_at.isoformat() if p.last_seen_at else None,
+    }
 
 # ---------------------------------------------------------------------------
 # ACCOUNT LOOKUP + BLOCK (Part 2 — admin dashboard "view any account" feature)
